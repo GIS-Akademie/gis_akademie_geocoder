@@ -4,26 +4,26 @@ Import worker for the INSPIRE GML format (Hamburg and other Bundesländer).
 
 Structure:
   - ad:ThoroughfareName  → street name (attribute: text)
-  - ad:PostalDescriptor  → postcode/PLZ (extractable from gml:id: PostalDescriptor_22359 → 22359)
+  - ad:PostalDescriptor  → postcode/PLZ (ad:postCode; fallback: 5-digit suffix
+                           of the gml:id, PostalDescriptor_22359 → 22359)
   - ad:AdminUnitName     → administrative unit (most specific = district/municipality)
   - ad:Address           → house number, coordinates, references to the above
 
 Strategy: two-pass streaming with xml.etree.ElementTree iterparse.
-  Pass 1: load all ThoroughfareName and AdminUnitName blocks into dicts
+  Pass 1: load all ThoroughfareName, AdminUnitName and PostalDescriptor blocks into dicts
   Pass 2: process Address features and resolve references
 """
 
-import sqlite3
 import os
 import re
+import xml.etree.ElementTree as ET
 
 from qgis.PyQt.QtCore import QObject, pyqtSignal
 
-from . import local_geocoder as _lc
-from .local_geocoder import init_db, normalize, _core_gemeinde
+from .db_import_worker import (
+    AddressSink, CANCEL_MSG, KEEP_MSG, _clean_gemeinde, _as_list,
+)
 from .plz_resolver import build_resolver_logged
-
-BATCH_SIZE = 5000
 
 
 def _n(x):
@@ -32,6 +32,7 @@ def _n(x):
         return f'{int(x):,}'.replace(',', '.')
     except (TypeError, ValueError):
         return str(x)
+
 
 # XML namespaces
 NS = {
@@ -52,6 +53,8 @@ def _tag(ns, local):
 # wfs:member (WFS 2.0 GetFeature response, e.g. Mecklenburg-Vorpommern) or
 # base:member (INSPIRE SpatialDataSet, e.g. Thüringen).
 _MEMBER_TAGS = {_tag('gml', 'featureMember'), _tag('wfs', 'member'), _tag('base', 'member')}
+_XLINK_HREF = f'{{{NS["xlink"]}}}href'
+_GML_ID = f'{{{NS["gml"]}}}id'
 
 
 def ref_id(href):
@@ -74,9 +77,82 @@ def _level_of(au_elem):
     lvl = au_elem.find(_tag('ad', 'level'))
     if lvl is None:
         return ''
-    href = lvl.get(f'{{{NS["xlink"]}}}href', '') or ''
+    href = lvl.get(_XLINK_HREF, '') or ''
     val  = href.rstrip('/').rsplit('/', 1)[-1] if href else (lvl.text or '')
     return val.strip()
+
+
+def _designator_kind(href):
+    """Code of a LocatorDesignatorTypeValue reference: the last path segment,
+    e.g. '…/LocatorDesignatorTypeValue/addressNumber' (with or without a
+    trailing slash) → 'addressNumber', '…/addressNumberExtension' →
+    'addressNumberExtension'."""
+    return ref_id(href or '')
+
+
+_PLZ_RE = re.compile(r'^\d{5}$')
+
+
+def _plz_of(components, postal_codes):
+    """5-digit PLZ of an address: ad:postCode of the referenced
+    PostalDescriptor, otherwise the id suffix (PostalDescriptor_22359) if it is
+    exactly 5 digits — else '' (then the PLZ fill-in from the areas applies)."""
+    for comp in components:
+        code = postal_codes.get(comp)
+        if code and _PLZ_RE.match(code):
+            return code
+        if comp.startswith('PostalDescriptor_'):
+            suffix = comp[len('PostalDescriptor_'):]
+            if _PLZ_RE.match(suffix):
+                return suffix
+    return ''
+
+
+# ── Coordinate reference system from srsName ────────────────────────────────
+
+_SRS_PATTERNS = (
+    # urn:ogc:def:crs:EPSG::25833 and versioned urn:ogc:def:crs:EPSG:6.12:25833
+    (re.compile(r'urn:ogc:def:crs:EPSG:[^:]*:(\d+)\s*$', re.I), True),
+    # http(s)://www.opengis.net/def/crs/EPSG/0/25833
+    (re.compile(r'/def/crs/EPSG/[^/]*/(\d+)\s*$', re.I), True),
+    # http://www.opengis.net/gml/srs/epsg.xml#25833 (traditional axis order)
+    (re.compile(r'epsg\.xml#(\d+)\s*$', re.I), False),
+    # EPSG:25833 (traditional axis order)
+    (re.compile(r'^\s*EPSG:(\d+)\s*$', re.I), False),
+)
+_ADV_RE = re.compile(r'urn:adv:crs:ETRS89_UTM(\d{2})', re.I)
+_LATLON_EPSG = (4258, 4326)       # geographic CRS with lat/lon axis order (URN/URI form)
+_SRS_CACHE = {}
+
+
+def parse_srs_name(srs, default=25832):
+    """srsName -> (epsg, swap_axes). swap_axes is True for 4258/4326 in URN/URI
+    form, whose axis order is latitude/longitude (x must become the longitude).
+    Unknown or missing: (default, False)."""
+    srs = (srs or '').strip()
+    hit = _SRS_CACHE.get(srs)
+    if hit is not None:
+        return hit
+    res = None
+    for rx, latlon_order in _SRS_PATTERNS:
+        m = rx.search(srs)
+        if m:
+            epsg = int(m.group(1))
+            res = (epsg, latlon_order and epsg in _LATLON_EPSG)
+            break
+    if res is None:
+        m = _ADV_RE.search(srs)
+        if m:
+            res = (25800 + int(m.group(1)), False)
+    if res is None:
+        m = re.search(r'EPSG:{1,2}(\d+)', srs, re.I)
+        res = (int(m.group(1)), False) if m else (default, False)
+    _SRS_CACHE[srs] = res
+    return res
+
+
+class _GmlBroken(Exception):
+    """XML error in an input file (message for the user)."""
 
 
 class GmlImportWorker(QObject):
@@ -86,32 +162,27 @@ class GmlImportWorker(QObject):
     detail    = pyqtSignal(str)             # technical details (QGIS message log)
     finished  = pyqtSignal(bool, str)
 
-    def __init__(self, filepath, bundesland, replace=True, gemeinde_level=None,
-                 rebuild_lookup=True, announce=True):
-        """filepath: one GML file or a LIST of files (e.g. the pages of a
+    def __init__(self, filepaths, bundesland, replace=True, gemeinde_level=None,
+                 rebuild_lookup=True, announce=True, allow_shrink=False):
+        """filepaths: one GML file or a LIST of files (e.g. the pages of a
         WFS download) — all are imported in ONE transaction.
         gemeinde_level: INSPIRE level (e.g. '4thOrder') of the administrative
         unit to be treated as the municipality (Gemeinde); if not given, the
-        previous heuristic applies (second referenced unit = city, last = locality)."""
+        previous heuristic applies (second referenced unit = city, last = locality).
+        allow_shrink: accept new data with far fewer addresses than before."""
         super().__init__()
-        self.filepaths  = [filepath] if isinstance(filepath, str) else list(filepath)
-        self.filepath   = self.filepaths[0]
+        self.filepaths  = _as_list(filepaths)
+        self.filepath   = self.filepaths[0] if self.filepaths else ''
         self.bundesland = bundesland
         self.gemeinde_level = gemeinde_level
         self.rebuild_lookup = rebuild_lookup
         self.announce       = announce      # False: called from the automatic download
         self.replace    = replace
+        self.allow_shrink = allow_shrink
         self._cancelled = False
-        self._plz_source    = None
-        self._plz_field     = 'plz'
-        self._plz_layername = None
         self._resolver      = None
-
-    def set_plz_layer(self, source, field='plz', layername=None):
-        """Optional postcode (PLZ) polygon layer; missing postcodes are filled in during import."""
-        self._plz_source    = source
-        self._plz_field     = field or 'plz'
-        self._plz_layername = layername
+        self._admin_levels  = {}
+        self._postal_codes  = {}
 
     def cancel(self):
         self._cancelled = True
@@ -119,22 +190,31 @@ class GmlImportWorker(QObject):
     def run(self):
         try:
             self._run()
+        except _GmlBroken as e:
+            self.finished.emit(False, str(e))
         except Exception as e:
             import traceback
             self.detail.emit(traceback.format_exc())
-            self.finished.emit(False, f'Import fehlgeschlagen: {e}. '
-                                      'Der bisherige Datenbestand bleibt erhalten.')
+            self.finished.emit(False, f'Import fehlgeschlagen: {e}. {KEEP_MSG}')
 
     def _iter_members(self):
         """Yields all feature containers (gml:featureMember /
-        wfs:member) of all input files in turn; the caller calls elem.clear()."""
-        import xml.etree.ElementTree as ET
+        wfs:member) of all input files in turn; the caller calls elem.clear().
+        An XML error raises _GmlBroken (the whole import is aborted — partial
+        data would replace the complete existing data)."""
         for path in self.filepaths:
-            for event, elem in ET.iterparse(path, events=('end',)):
-                if _is_member(elem.tag):
-                    yield elem
-                elif self._cancelled:
-                    return
+            try:
+                for event, elem in ET.iterparse(path, events=('end',)):
+                    if _is_member(elem.tag):
+                        yield elem
+                    elif self._cancelled:
+                        return
+            except ET.ParseError as e:
+                self.detail.emit(f'XML-Parse-Fehler in {path}: {e}')
+                raise _GmlBroken(
+                    f'Die Datei {os.path.basename(path)} ist beschädigt oder unvollständig '
+                    f'(XML-Fehler: {e}). Der Import wurde abgebrochen – der bisherige '
+                    'Datenbestand bleibt erhalten.') from e
 
     def _run(self):
         if len(self.filepaths) == 1:
@@ -147,11 +227,11 @@ class GmlImportWorker(QObject):
         self.progress.emit(0, 0, 'Lese Straßennamen und Orte …')
         street_names, admin_names = self._build_lookup_tables()
         if self._cancelled:
-            self.finished.emit(False, 'Import abgebrochen – der bisherige '
-                                      'Datenbestand bleibt erhalten.')
+            self.finished.emit(False, CANCEL_MSG)
             return
         self.detail.emit(f'Pass 1: {_n(len(street_names))} Straßennamen, '
-                         f'{_n(len(admin_names))} Verwaltungseinheiten.')
+                         f'{_n(len(admin_names))} Verwaltungseinheiten, '
+                         f'{_n(len(self._postal_codes))} Postleitzahlen.')
 
         if not street_names:
             self.finished.emit(False,
@@ -160,71 +240,40 @@ class GmlImportWorker(QObject):
                 'gewählt wurde.')
             return
 
-        # ── Database connection ───────────────────────────────────────────────
-        conn = sqlite3.connect(_lc.DB_PATH)
-        init_db(conn)
-
         # DELETE and all INSERTs run in ONE transaction (commit only at the
-        # very end, rollback on error/cancel) — as in the HK-DE import. Previously
-        # the DELETE and each batch were committed immediately; a cancel
-        # left the old data deleted plus partial data.
+        # very end, rollback on error/cancel) — shared write path AddressSink.
+        sink = AddressSink(self.replace, self.rebuild_lookup, self.allow_shrink,
+                           self.log.emit, self.detail.emit)
         try:
-            if self.replace:
-                self.log.emit(f'Die bisherigen Adressen für {self.bundesland} werden ersetzt.')
-                conn.execute("DELETE FROM addresses WHERE bundesland = ?",
-                             (self.bundesland,))
+            sink.start(self.bundesland)
 
             # ── Pass 2: import Address features ───────────────────────────────
             if self.announce:
                 self.log.emit('Importiere Adressen …')
-            self._resolver = build_resolver_logged(
-                self._plz_source, self._plz_field, self._plz_layername, self.log.emit,
-                self.detail.emit)
+            self._resolver = build_resolver_logged(log=self.log.emit, detail=self.detail.emit)
             # Use file size as an estimate for overall progress
             try:
                 estimated_total = sum(os.path.getsize(p) for p in self.filepaths) // 250
             except Exception:
                 estimated_total = 0
             self.progress.emit(0, estimated_total, 'Importiere Adressen …')
-            n_ok, n_skip = self._import_addresses(conn, street_names, admin_names,
-                                                   estimated_total)
+            n_skip = self._import_addresses(sink, street_names, admin_names, estimated_total)
 
             if self._cancelled:
-                conn.rollback()
-                self.finished.emit(False, 'Import abgebrochen – der bisherige '
-                                          'Datenbestand bleibt erhalten.')
+                sink.rollback()
+                self.finished.emit(False, CANCEL_MSG)
                 return
-
-            if n_ok == 0:
-                # Empty or wrong file (e.g. maintenance page instead of data): replace
-                # nothing — otherwise the state's existing data would be deleted
-                conn.rollback()
-                conn.close()
-                self.finished.emit(False, 'In der Datei wurden keine Adressen gefunden – der bisherige '
-                                          'Datenbestand bleibt erhalten.')
+            ok, msg = sink.finish(self._resolver)
+            if not ok:
+                self.finished.emit(False, msg)
                 return
-            if self._resolver is not None:
-                st = self._resolver.stats()
-                if st["matched"] or st["missed"]:   # nothing to fill in → no message
-                    self.log.emit(f"PLZ ergänzt für {_n(st['matched'])} Adressen"
-                                  + (f"; {_n(st['missed'])} liegen außerhalb der PLZ-Flächen."
-                                     if st['missed'] else '.'))
-            _lc.record_plz_meta(conn, self.bundesland,
-                                _lc.resolver_info(self._resolver, self._plz_source,
-                                                  self._plz_field, self._plz_layername),
-                                self.replace)
-
-            # Municipality/locality index for the new data (part of the same
-            # transaction), then ONE atomic commit including the DELETE.
-            if self.rebuild_lookup:
-                _lc.rebuild_lookup_tables(conn, self.log.emit)
-            conn.commit()
         except Exception:
-            conn.rollback()
+            sink.rollback()
             raise               # run() reports the error; existing data is kept
         finally:
-            conn.close()
+            sink.close()
 
+        n_ok = sink.n_ok
         msg = f'Import abgeschlossen: {_n(n_ok)} Adressen importiert'
         if n_skip:
             msg += f' ({_n(n_skip)} Einträge ohne verwertbare Adresse übersprungen)'
@@ -235,44 +284,45 @@ class GmlImportWorker(QObject):
 
     def _build_lookup_tables(self):
         """
-        Reads all ThoroughfareName and AdminUnitName features into dicts.
+        Reads all ThoroughfareName, AdminUnitName and PostalDescriptor features.
         street_names: {gml_id → street name}
         admin_names:  {gml_id → name}
+        self._postal_codes: {gml_id → ad:postCode}
         """
-        import xml.etree.ElementTree as ET
-
         street_names = {}
         admin_names  = {}
         self._admin_levels = {}   # gml_id -> INSPIRE level ('4thOrder' …)
+        self._postal_codes = {}
+        tag_tf, tag_au = _tag('ad', 'ThoroughfareName'), _tag('ad', 'AdminUnitName')
+        tag_pd, tag_pc = _tag('ad', 'PostalDescriptor'), _tag('ad', 'postCode')
 
-        try:
-            for elem in self._iter_members():
-                if self._cancelled:
-                    return {}, {}
+        for elem in self._iter_members():
+            if self._cancelled:
+                return {}, {}
 
-                # ThoroughfareName
-                tf = elem.find(f'.//{_tag("ad", "ThoroughfareName")}')
-                if tf is not None:
-                    gml_id = tf.get(f'{{{NS["gml"]}}}id', '')
-                    name   = self._extract_geo_name(tf)
-                    if gml_id and name:
-                        street_names[gml_id] = name
+            tf = elem.find(f'.//{tag_tf}')
+            if tf is not None:
+                gml_id = tf.get(_GML_ID, '')
+                name   = self._extract_geo_name(tf)
+                if gml_id and name:
+                    street_names[gml_id] = name
 
-                # AdminUnitName
-                au = elem.find(f'.//{_tag("ad", "AdminUnitName")}')
-                if au is not None:
-                    gml_id = au.get(f'{{{NS["gml"]}}}id', '')
-                    name   = self._extract_geo_name(au)
-                    if gml_id and name:
-                        admin_names[gml_id] = name
-                        self._admin_levels[gml_id] = _level_of(au)
+            au = elem.find(f'.//{tag_au}')
+            if au is not None:
+                gml_id = au.get(_GML_ID, '')
+                name   = self._extract_geo_name(au)
+                if gml_id and name:
+                    admin_names[gml_id] = name
+                    self._admin_levels[gml_id] = _level_of(au)
 
-                elem.clear()
+            pd = elem.find(f'.//{tag_pd}')
+            if pd is not None:
+                gml_id = pd.get(_GML_ID, '')
+                pc = pd.find(f'.//{tag_pc}')
+                if gml_id:
+                    self._postal_codes[gml_id] = (pc.text or '').strip() if pc is not None else ''
 
-        except ET.ParseError as e:
-            self.log.emit('Warnung: Die Datei ist beschädigt oder unvollständig – es werden '
-                          'nur die lesbaren Adressen übernommen.')
-            self.detail.emit(f'XML-Parse-Fehler in Pass 1: {e}')
+            elem.clear()
 
         return street_names, admin_names
 
@@ -286,22 +336,21 @@ class GmlImportWorker(QObject):
 
     # ── Pass 2 ────────────────────────────────────────────────────────────────
 
-    def _import_addresses(self, conn, street_names, admin_names, estimated_total=0):
-        batch  = []
-        n_ok   = 0
+    def _import_addresses(self, sink, street_names, admin_names, estimated_total=0):
         n_skip = 0
         n_feat = 0
         n_err_logged = 0
         seen_ids = set()     # addresses at tile edges appear twice
         n_dup = 0
+        gem_cache = {}
 
         tag_address  = _tag('ad', 'Address')
         tag_pos      = _tag('gml', 'pos')
+        tag_point    = _tag('gml', 'Point')
         tag_desig    = _tag('ad', 'designator')
         tag_loc_des  = _tag('ad', 'LocatorDesignator')
         tag_type     = _tag('ad', 'type')
         tag_component = _tag('ad', 'component')
-        xlink_href   = f'{{{NS["xlink"]}}}href'
 
         for elem in self._iter_members():
             if self._cancelled:
@@ -311,7 +360,7 @@ class GmlImportWorker(QObject):
             if addr is None:
                 elem.clear()
                 continue
-            addr_id = addr.get(f'{{{NS["gml"]}}}id', '')
+            addr_id = addr.get(_GML_ID, '')
             if addr_id:
                 if addr_id in seen_ids:
                     n_dup += 1
@@ -321,171 +370,112 @@ class GmlImportWorker(QObject):
 
             n_feat += 1
             if n_feat % 20000 == 0:
-                self.progress.emit(n_feat, estimated_total, f'{_n(n_ok)} Adressen eingelesen …')
+                self.progress.emit(n_feat, estimated_total, f'{_n(sink.n_ok)} Adressen eingelesen …')
 
+            # Parsing errors of a single feature skip only this feature;
+            # writing (sink.add) is OUTSIDE this try — DB errors abort the import.
             try:
-                # Coordinates
-                pos_elem = addr.find(f'.//{tag_pos}')
-                if pos_elem is None or not pos_elem.text:
-                    n_skip += 1
-                    elem.clear()
-                    continue
-                coords = pos_elem.text.strip().split()
-                if len(coords) < 2:
-                    n_skip += 1
-                    elem.clear()
-                    continue
-                x, y = float(coords[0]), float(coords[1])
-
-                # EPSG from srsName
-                epsg = 25832
-                pt_elem = addr.find(f'.//{_tag("gml", "Point")}')
-                if pt_elem is not None:
-                    srs = pt_elem.get('srsName', '')
-                    # 'EPSG:25832' as well as the usual INSPIRE form
-                    # 'urn:ogc:def:crs:EPSG::25832' (two colons) —
-                    # the latter was previously not recognized, it always stayed 25832.
-                    m = re.search(r'EPSG:{1,2}(\d+)', srs, re.IGNORECASE)
-                    if m:
-                        epsg = int(m.group(1))
-
-                # House number and suffix
-                hausnummer = ''
-                hn_zusatz  = ''
-                for loc_des in addr.findall(f'.//{tag_loc_des}'):
-                    type_elem = loc_des.find(tag_type)
-                    des_elem  = loc_des.find(tag_desig)
-                    if type_elem is None or des_elem is None:
-                        continue
-                    href = type_elem.get(xlink_href, '')
-                    if 'addressNumber/' in href or href.endswith('addressNumber'):
-                        hausnummer = des_elem.text.strip() if des_elem.text else ''
-                    elif 'addressNumberExtension' in href:
-                        hn_zusatz = des_elem.text.strip() if des_elem.text else ''
-
-                # Resolve references
-                # Reference IDs: '#AdminUnitName_1' (file) or full URL
-                # 'https://…GetFeatureById&ID=…#AdminUnitName_1' (WFS M-V) —
-                # the part after the last '#' is always what counts.
-                components = [
-                    ref_id(c.get(xlink_href, ''))
-                    for c in addr.findall(tag_component)
-                ]
-
-                # Street name
-                strasse = ''
-                for comp_id in components:
-                    if comp_id in street_names:
-                        strasse = street_names[comp_id]
-                        break
-
-                # Postcode (PLZ) from PostalDescriptor ID (PostalDescriptor_22359 → 22359)
-                plz = ''
-                for comp_id in components:
-                    if comp_id.startswith('PostalDescriptor_'):
-                        plz = comp_id.replace('PostalDescriptor_', '')
-                        break
-
-                # Fill in missing postcodes from the postcode areas
-                herkunft = None
-                if not plz and self._resolver is not None:
-                    plz = self._resolver.lookup(x, y, epsg)
-                    herkunft = 'gebiet' if plz else None
-
-                # Build the municipality hierarchy from AdminUnitName references.
-                # INSPIRE Hamburg has 6 administrative levels:
-                #   Index 0: Bundesland (Hamburg)
-                #   Index 1: city of Hamburg  ← this is the "city" for searching
-                #   Index 2-5: borough/locality (too specific as municipality)
-                # We store index 1 as gemeinde (= Hamburg) and
-                # the most specific one as kreis (= city district/Stadtteil).
-                au_refs = [c for c in components
-                           if c.startswith('AdminUnitName_') and c in admin_names]
-                gemeinde = ''
-                ortsteil  = ''
-                if self.gemeinde_level:
-                    # Configured INSPIRE level (e.g. '4thOrder' = municipality in M-V)
-                    for ref in au_refs:
-                        if self._admin_levels.get(ref) == self.gemeinde_level:
-                            gemeinde = admin_names[ref]
-                            break
-                if not gemeinde:
-                    if len(au_refs) >= 2:
-                        # Index 1 = parent city (Hamburg)
-                        gemeinde = admin_names[au_refs[1]]
-                    elif len(au_refs) == 1:
-                        gemeinde = admin_names[au_refs[0]]
-                if au_refs:
-                    # Most specific = last entry = locality/city district
-                    ortsteil = admin_names[au_refs[-1]]
-
-                if not strasse:
-                    n_skip += 1
-                    elem.clear()
-                    continue
-
-                batch.append((
-                    self.bundesland,
-                    ortsteil,        # kreis = city district (Stadtteil)
-                    gemeinde,
-                    plz,
-                    strasse,
-                    hausnummer,
-                    hn_zusatz,
-                    epsg,
-                    x,
-                    y,
-                    normalize(strasse),
-                    _core_gemeinde(gemeinde),
-                    herkunft,
-                ))
-                n_ok += 1
-
-                if len(batch) >= BATCH_SIZE:
-                    self._flush(conn, batch)
-                    batch = []
-
+                row = self._parse_address(addr, street_names, admin_names, gem_cache,
+                                          tag_pos, tag_point, tag_desig, tag_loc_des,
+                                          tag_type, tag_component)
             except Exception as e:
-                n_skip += 1
+                row = None
                 if n_err_logged < 3:
                     n_err_logged += 1
                     self.detail.emit(f'Feature übersprungen ({type(e).__name__}: {e})')
-
             elem.clear()
-
-        if batch:
-            self._flush(conn, batch)
+            if row is None:
+                n_skip += 1
+                continue
+            sink.add(*row)
 
         if n_dup:
             self.detail.emit(f'{_n(n_dup)} doppelte Adressen (gleiche gml:id) übersprungen.')
-        return n_ok, n_skip
+        return n_skip
 
-    def _flush(self, conn, batch):
-        conn.executemany("""
-            INSERT INTO addresses
-              (bundesland, kreis, gemeinde, plz, strasse, hausnummer,
-               hausnr_zusatz, epsg, x, y, strasse_norm, gemeinde_norm, plz_herkunft)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
-        """, batch)
-        # NO commit per batch — the whole transaction is committed in _run.
+    def _parse_address(self, addr, street_names, admin_names, gem_cache, tag_pos, tag_point,
+                       tag_desig, tag_loc_des, tag_type, tag_component):
+        """One ad:Address -> argument tuple for AddressSink.add, or None."""
+        pos_elem = addr.find(f'.//{tag_pos}')
+        if pos_elem is None or not pos_elem.text:
+            return None
+        coords = pos_elem.text.strip().split()
+        if len(coords) < 2:
+            return None
+        x, y = float(coords[0]), float(coords[1])
 
-    def _detect_encoding(self):
-        try:
-            with open(self.filepath, 'rb') as f:
-                start = f.read(200).decode('ascii', errors='replace')
-            m = re.search(r'encoding=["\']([^"\']+)["\']', start)
-            if m:
-                return m.group(1)
-        except Exception:
-            pass
-        return 'utf-8'
+        # EPSG from srsName (of the point, otherwise of gml:pos)
+        pt_elem = addr.find(f'.//{tag_point}')
+        srs = (pt_elem.get('srsName', '') if pt_elem is not None else '') or \
+            pos_elem.get('srsName', '')
+        epsg, swap = parse_srs_name(srs)
+        if swap:                     # lat/lon axis order -> x = longitude
+            x, y = y, x
+
+        # House number and suffix
+        hausnummer = ''
+        hn_zusatz  = ''
+        for loc_des in addr.findall(f'.//{tag_loc_des}'):
+            type_elem = loc_des.find(tag_type)
+            des_elem  = loc_des.find(tag_desig)
+            if type_elem is None or des_elem is None:
+                continue
+            kind = _designator_kind(type_elem.get(_XLINK_HREF, ''))
+            if kind == 'addressNumber':
+                hausnummer = des_elem.text.strip() if des_elem.text else ''
+            elif kind == 'addressNumberExtension':
+                hn_zusatz = des_elem.text.strip() if des_elem.text else ''
+
+        # Reference IDs: '#AdminUnitName_1' (file) or full URL
+        # 'https://…GetFeatureById&ID=…#AdminUnitName_1' (WFS M-V) —
+        # the part after the last '#' is always what counts.
+        components = [ref_id(c.get(_XLINK_HREF, '')) for c in addr.findall(tag_component)]
+
+        strasse = next((street_names[c] for c in components if c in street_names), '')
+        if not strasse:
+            return None
+
+        plz = _plz_of(components, self._postal_codes)
+        herkunft = None
+        if not plz and self._resolver is not None:
+            plz = self._resolver.lookup(x, y, epsg)
+            herkunft = 'gebiet' if plz else None
+
+        # Municipality hierarchy from the referenced administrative units
+        # (resolved by feature type, whatever the id looks like).
+        # INSPIRE Hamburg has 6 administrative levels:
+        #   Index 0: Bundesland (Hamburg)
+        #   Index 1: city of Hamburg  ← this is the "city" for searching
+        #   Index 2-5: borough/locality (too specific as municipality)
+        # We store index 1 as gemeinde (= Hamburg) and
+        # the most specific one as kreis (= city district/Stadtteil).
+        au_refs = [c for c in components if c in admin_names]
+        gemeinde = ''
+        ortsteil = ''
+        if self.gemeinde_level:
+            # Configured INSPIRE level (e.g. '4thOrder' = municipality in M-V)
+            for ref in au_refs:
+                if self._admin_levels.get(ref) == self.gemeinde_level:
+                    gemeinde = admin_names[ref]
+                    break
+        if not gemeinde:
+            if len(au_refs) >= 2:
+                gemeinde = admin_names[au_refs[1]]      # index 1 = parent city
+            elif len(au_refs) == 1:
+                gemeinde = admin_names[au_refs[0]]
+        if au_refs:
+            ortsteil = admin_names[au_refs[-1]]         # most specific = locality
+        clean = gem_cache.get(gemeinde)
+        if clean is None:
+            clean = gem_cache[gemeinde] = _clean_gemeinde(gemeinde)
+
+        return (self.bundesland, ortsteil, clean, plz, strasse, hausnummer, hn_zusatz,
+                epsg, x, y, herkunft)
 
     @staticmethod
     def preview_file(filepath, n=2):
         """Quick preview: reads the first n Address features."""
-        import xml.etree.ElementTree as ET
         results = []
-        xlink_href = f'{{{NS["xlink"]}}}href'
         try:
             for event, elem in ET.iterparse(filepath, events=('end',)):
                 if _is_member(elem.tag):
@@ -493,22 +483,21 @@ class GmlImportWorker(QObject):
                     if addr is not None:
                         pos = addr.find(f'.//{_tag("gml", "pos")}')
                         components = [
-                            ref_id(c.get(xlink_href, ''))
+                            ref_id(c.get(_XLINK_HREF, ''))
                             for c in addr.findall(_tag('ad', 'component'))
                         ]
-                        plz = next((c.replace('PostalDescriptor_', '')
-                                    for c in components
-                                    if c.startswith('PostalDescriptor_')), '')
+                        plz = _plz_of(components, {})
                         tf_ref = next((c for c in components
                                        if c.startswith('ThoroughfareName_')), '')
                         hn = ''
                         for ld in addr.findall(f'.//{_tag("ad", "LocatorDesignator")}'):
                             t = ld.find(_tag('ad', 'type'))
                             d = ld.find(_tag('ad', 'designator'))
-                            if t is not None and 'addressNumber/' in t.get(xlink_href,'') and d is not None:
-                                hn = d.text or ''
+                            if (t is not None and d is not None
+                                    and _designator_kind(t.get(_XLINK_HREF, '')) == 'addressNumber'):
+                                hn = (d.text or '').strip()
                                 break
-                        coords = pos.text.strip().split() if pos is not None and pos.text else ['?','?']
+                        coords = pos.text.strip().split() if pos is not None and pos.text else ['?', '?']
                         results.append({
                             'hausnummer':   hn,
                             'plz':          plz,

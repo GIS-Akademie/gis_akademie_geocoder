@@ -71,7 +71,7 @@ def test_gml_import_wfs_pages_with_level(db, tmp_path):
     conn.close()
     assert len(rows) == 2
     g, gn, kreis, strasse, sn, hn, epsg, plz = rows[0]
-    assert (g, gn) == ('Güstrow, Barlachstadt', 'güstrow')      # level 4 = municipality, status suffix removed
+    assert (g, gn) == ('Güstrow', 'güstrow')                    # level 4 = municipality, status suffix removed
     assert kreis == 'Suckow'                                     # last unit = district
     assert (strasse, sn, hn, epsg, plz) == ('Lange Str.', 'lange straße', '7', 25833, '')
     assert rows[1][2] == 'Güstrow, Barlachstadt'                 # no district: last = municipality

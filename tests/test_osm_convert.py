@@ -174,3 +174,42 @@ def test_worker_reports_lock_as_skipped(db, monkeypatch):
     assert result['ok'], result
     assert 'Bayern: übersprungen – Zuletzt vor 3 Tagen geladen' in result['msg']
     assert 'keine neuen Daten' not in result['msg']
+
+
+_OSM_TWO_VILLAGES = """<?xml version='1.0' encoding='UTF-8'?>
+<osm version="0.6" generator="test">
+  <node id="1" lat="48.10" lon="11.50"/><node id="2" lat="48.10" lon="11.60"/>
+  <node id="3" lat="48.20" lon="11.60"/><node id="4" lat="48.20" lon="11.50"/>
+  <node id="5" lat="48.10" lon="11.70"/><node id="6" lat="48.20" lon="11.70"/>
+  <node id="10" lat="48.150" lon="11.520"><tag k="addr:street" v="Hauptstraße"/>
+    <tag k="addr:housenumber" v="1"/></node>
+  <node id="11" lat="48.150" lon="11.580"><tag k="addr:street" v="Hauptstraße"/>
+    <tag k="addr:housenumber" v="1"/></node>
+  <node id="12" lat="48.150" lon="11.650"><tag k="addr:street" v="Hauptstraße"/>
+    <tag k="addr:housenumber" v="1"/></node>
+  <node id="13" lat="48.1501" lon="11.6501"><tag k="addr:street" v="Hauptstraße"/>
+    <tag k="addr:housenumber" v="1"/></node>
+  <way id="200"><nd ref="1"/><nd ref="2"/><nd ref="3"/><nd ref="4"/><nd ref="1"/></way>
+  <way id="201"><nd ref="2"/><nd ref="5"/><nd ref="6"/><nd ref="3"/><nd ref="2"/></way>
+  <relation id="300"><member type="way" ref="200" role="outer"/>
+    <tag k="type" v="boundary"/><tag k="boundary" v="administrative"/>
+    <tag k="admin_level" v="8"/><tag k="name" v="Westdorf"/></relation>
+  <relation id="301"><member type="way" ref="201" role="outer"/>
+    <tag k="type" v="boundary"/><tag k="boundary" v="administrative"/>
+    <tag k="admin_level" v="8"/><tag k="name" v="Ostdorf"/></relation>
+</osm>
+"""
+
+
+@needs_gdal
+def test_osm_same_address_in_two_places_is_kept(tmp_path):
+    """Without addr:city and postcode: 'Hauptstraße 1' in two municipalities and
+    twice within Westdorf (4 km apart) are real addresses; only the object 15 m
+    next to Ostdorf's address is a duplicate."""
+    p = tmp_path / 'v.osm'
+    p.write_text(_OSM_TWO_VILLAGES, encoding='utf-8')
+    out = str(tmp_path / 'hk.txt')
+    st = oc.osm_to_hkby(str(p), out, 'Bayern')
+    rows = [line.split(';') for line in open(out, encoding='utf-8').read().splitlines()[1:]]
+    assert sorted(r[10] for r in rows) == ['Ostdorf', 'Westdorf', 'Westdorf']
+    assert st['adressen'] == 3 and st['doppelt'] == 1 and st['gemeinde_ergaenzt'] == 4

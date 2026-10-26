@@ -31,6 +31,42 @@ _lookup_checked   = False    # Gemeinde/Ortsteil directory of this DB checked
 _lookup_available = {}       # DB_PATH -> bool (directory tables present)
 
 
+class RebuildCancelled(Exception):
+    """rebuild_lookup_tables() was cancelled via its cancel() callback. The
+    rebuild has been rolled back; the previous directory tables are intact."""
+
+
+class DatabaseLocked(sqlite3.OperationalError):
+    """The database is locked by another connection — typically a running
+    import that holds the write lock. Subclass of OperationalError so that
+    existing handlers keep working."""
+
+
+def _is_locked_error(exc):
+    """True if exc is SQLite's 'database is locked' / 'busy' error."""
+    if isinstance(exc, DatabaseLocked):
+        return True
+    if not isinstance(exc, sqlite3.OperationalError):
+        return False
+    msg = str(exc).lower()
+    return 'locked' in msg or 'busy' in msg
+
+
+def normalize_plz(value):
+    """Comparison form of a PLZ (postcode): stripped, a trailing '.0' removed
+    (number read from a spreadsheet as float) and a 4-digit numeric PLZ
+    zero-padded to 5 digits — spreadsheets turn 01067 into 1067. Returns ''
+    for empty input; anything else is returned stripped but unchanged."""
+    if value is None:
+        return ''
+    s = str(value).strip()
+    if s.endswith('.0') and s[:-2].isdigit():
+        s = s[:-2]
+    if len(s) == 4 and s.isdigit():
+        s = '0' + s
+    return s
+
+
 # ── Levenshtein ───────────────────────────────────────────────────────────────
 
 def levenshtein(a, b):
@@ -205,11 +241,13 @@ def _resolve_gemeinde(conn, gemeinde_n, bundesland=None):
     returned unchanged."""
     if not gemeinde_n:
         return gemeinde_n
-    # 1. Present exactly? (one index-backed LIMIT 1 check)
+    # 1. Present exactly? (one index-backed LIMIT 1 check). The unary '+'
+    #    on bundesland keeps SQLite from choosing idx_bundesland (whole state)
+    #    over idx_gem_str when the DB has no ANALYZE statistics.
     sql    = "SELECT 1 FROM addresses WHERE gemeinde_norm = ?"
     params = [gemeinde_n]
     if bundesland:
-        sql += " AND bundesland = ?"
+        sql += " AND +bundesland = ?"
         params.append(bundesland)
     sql += " LIMIT 1"
     if conn.execute(sql, params).fetchone():
@@ -248,7 +286,7 @@ def _resolve_gemeinde(conn, gemeinde_n, bundesland=None):
                   "WHERE gemeinde_norm >= ? AND gemeinde_norm < ?")
         params = [pfx, hi]
         if bundesland:
-            sql += " AND bundesland = ?"
+            sql += " AND +bundesland = ?"
             params.append(bundesland)
         sql += " LIMIT 1000"
         for row in conn.execute(sql, params).fetchall():
@@ -269,46 +307,86 @@ _HN_EXPR = r'\d{1,5}\s*[a-zA-Z]?(?:\s*[-–/+]\s*\d*\s*[a-zA-Z]?)*'
 _HN_EXPR_RE  = re.compile(r'^(' + _HN_EXPR + r')$')
 _HN_TAIL_RE  = re.compile(r'\s+(' + _HN_EXPR + r')\s*$')
 _HN_FIRST_RE = re.compile(r'^(\d+)\s*([a-zA-Z])?')
+# Sub-number ('Unternummer', common in Baden-Württemberg): '12/1', '3b/2'.
+_HN_SUB_RE   = re.compile(r'^(\d{1,5})\s*([a-z])?\s*/\s*(\d{1,3})$')
+# House number glued to the street name: 'hauptstraße12', 'hauptstraße.12'
+# (normalize() turns 'Hauptstr.12' into 'hauptstraße.12'). At least three
+# letters before the number so that names like 'B5' or 'Q7' stay intact.
+_HN_GLUED_RE = re.compile(r'^(.*?[^\W\d_]{3,}\.?)(' + _HN_EXPR + r')$')
 
 
 def normalize_hausnummer(h):
     """Bring a house number into comparison form: lowercase, no spaces,
     no 'Nr.' prefix; for ranges/alternatives the FIRST number counts
-    ('12-14' → '12', '12 a' → '12a', '12/1' → '12', 'Nr. 7' → '7')."""
+    ('12-14' → '12', '12 a' → '12a', '12/14' → '12', 'Nr. 7' → '7').
+    A sub-number ('12/1': second number not larger than the first) is kept
+    as '12/1' — it is a DIFFERENT building than '12'."""
     h = (h or '').strip().lower()
     if not h:
         return ''
     h = re.sub(r'^(?:haus)?(?:nr|nummer|no)\.?\s*', '', h)
+    m = _HN_SUB_RE.match(h)
+    if m and int(m.group(3)) <= int(m.group(1)):
+        return m.group(1) + (m.group(2) or '') + '/' + m.group(3)
     if _HN_EXPR_RE.match(h):
         m = _HN_FIRST_RE.match(h)
         return m.group(1) + (m.group(2) or '')
     return re.sub(r'\s+', '', h)
 
 
+def _row_hausnummer(hausnummer, zusatz):
+    """Display form of a stored house number. A purely numeric suffix is a
+    sub-number and is joined with '/' (HK-DE Baden-Württemberg stores
+    'Königstraße 16/1' as ('16', '1') — plain concatenation would read 161);
+    letters and suffixes that already carry the '/' are appended directly."""
+    hn = (hausnummer or '').strip()
+    z  = (zusatz or '').strip()
+    if z[:1].isdigit():
+        return f'{hn}/{z}'
+    return hn + z
+
+
+def _row_hn_key(hausnummer, zusatz):
+    """Comparison form of a stored house number (see normalize_hausnummer)."""
+    return re.sub(r'\s+', '', _row_hausnummer(hausnummer, zusatz).lower())
+
+
+# SQL equivalent of _row_hn_key() (for ORDER BY in the candidate query).
+_ROW_HN_SQL = ("replace(lower(CASE WHEN substr(trim(coalesce(hausnr_zusatz, '')), 1, 1)"
+               " BETWEEN '0' AND '9'"
+               " THEN coalesce(hausnummer, '') || '/' || trim(hausnr_zusatz)"
+               " ELSE coalesce(hausnummer, '') || coalesce(hausnr_zusatz, '') END), ' ', '')")
+
+
 def _extract_hausnummer(strasse_n):
     """Split the house number (incl. ranges like '12-14') off the end of the
-    street text. Returns (street, normalized_house_number)."""
+    street text. Returns (street, normalized_house_number). Also handles a
+    number written without a space ('hauptstraße12', 'Hauptstr.12')."""
     m = _HN_TAIL_RE.search(strasse_n)
     if m:
         return strasse_n[:m.start()].strip(), normalize_hausnummer(m.group(1))
+    m = _HN_GLUED_RE.match(strasse_n or '')
+    if m:
+        return normalize(m.group(1)), normalize_hausnummer(m.group(2))
     return strasse_n, ''
 
 
 # ── Bundesland detection (shared by worker and dialog) ───────────────────────
 
-# PLZ prefix (first 2 digits) → Bundesland (matches the table in the help).
+# PLZ prefix (first 2 digits) → Bundesland.
 # Prefixes spanning several states are deliberately left unmapped — the
 # search then runs without a Bundesland filter, Gemeinde/PLZ decide:
-#   27 Bremen/Bremerhaven · 37 Göttingen (NI) ↔ Eschwege (HE) ↔ Beverungen (NRW)
+#   14 Berlin ↔ Potsdam (BB) · 27 Bremen/Bremerhaven ·
+#   37 Göttingen (NI) ↔ Eschwege (HE) ↔ Beverungen (NRW) ·
 #   49 Osnabrück (NI) ↔ NRW · 76 Karlsruhe (BW) ↔ Landau (RP)
 # The Bundesland is only a pre-filter anyway: if the Gemeinde search fails
 # with it, search() repeats it without the filter (see local_geocoder.search).
 _PLZ_PREFIX_GROUPS = {
     'Nordrhein-Westfalen':    ['32', '33', '40', '41', '42', '44', '45', '46', '47',
-                               '48', '49', '50', '51', '52', '53', '57', '58', '59'],
+                               '48', '50', '51', '52', '53', '57', '58', '59'],
     'Hamburg':                ['20', '21', '22'],
     'Hessen':                 ['34', '35', '36', '60', '61', '63', '64', '65'],
-    'Berlin':                 ['10', '12', '13', '14'],
+    'Berlin':                 ['10', '12', '13'],
     'Sachsen':                ['01', '02', '04', '08', '09'],
     'Brandenburg':            ['03', '15', '16'],
     'Sachsen-Anhalt':         ['06', '39'],
@@ -332,7 +410,7 @@ for _bl, _prefixes in _PLZ_PREFIX_GROUPS.items():
 
 def bundesland_from_plz(plz):
     """Bundesland from the PLZ prefix, or '' if unknown/ambiguous."""
-    plz = (plz or '').strip()
+    plz = normalize_plz(plz)
     if len(plz) < 2:
         return ''
     return PLZ_PREFIX_TO_BUNDESLAND.get(plz[:2], '')
@@ -385,8 +463,8 @@ def canonical_bundesland(text):
 
 # ── Database access ───────────────────────────────────────────────────────────
 
-def get_connection():
-    conn = sqlite3.connect(DB_PATH)
+def get_connection(timeout=5.0):
+    conn = sqlite3.connect(DB_PATH, timeout=timeout)
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -502,16 +580,81 @@ def _ortsteil_alias_norm(kreis):
     return _core_gemeinde(k)
 
 
-def rebuild_lookup_tables(conn, log=None):
-    """Rebuild gemeinde_index / ortsteil_index / lookup_meta. Does NOT commit
-    itself — the caller decides (import worker: inside the import
-    transaction, followed by a single shared commit)."""
+_REBUILD_CHUNK = 5000   # rows per INSERT chunk (cancel is checked in between)
+
+# Columns the search needs in the directory tables. Used to decide whether an
+# existing directory (e.g. built by an older version) is still usable when it
+# cannot be rebuilt (read-only DB, locked by an import).
+_GEMEINDE_INDEX_COLS = {'gemeinde_norm', 'kurz_norm', 'bundesland', 'gemeinde',
+                        'n', 'cx', 'cy', 'epsg'}
+_ORTSTEIL_INDEX_COLS = {'alias_norm', 'gemeinde_norm', 'bundesland', 'n'}
+
+
+def rebuild_lookup_tables(conn, log=None, cancel=None):
+    """Rebuild gemeinde_index / ortsteil_index / bundesland_index /
+    lookup_meta and refresh the planner statistics (ANALYZE).
+
+    Runs as ONE transaction: without an open transaction an explicit BEGIN is
+    issued (Python's sqlite3 would otherwise autocommit every DROP/CREATE on
+    its own); inside a transaction of the caller (import worker: DELETE +
+    INSERTs not yet committed) a SAVEPOINT is used. Does NOT commit — the
+    caller commits afterwards (import worker: one shared commit).
+
+    cancel: optional callable; checked between the phases, between INSERT
+    chunks and — via an SQLite progress handler — during the long GROUP BY
+    scan. On cancel the rebuild is rolled back (the previous directory stays
+    intact; the caller's own pending changes are kept when a SAVEPOINT was
+    used) and RebuildCancelled is raised. Any other error is rolled back the
+    same way and re-raised."""
     if log:
         try:
             log('Suchverzeichnis wird aktualisiert (bei der bundesweiten '
                 'Datenbank zwei bis drei Minuten) …')
         except Exception:
             pass
+
+    def check():
+        if cancel is not None and cancel():
+            raise RebuildCancelled()
+
+    check()
+    own_tx = not conn.in_transaction
+    conn.execute('BEGIN' if own_tx else 'SAVEPOINT rebuild_lookup')
+    if cancel is not None:
+        # Interrupts a running statement (the GROUP BY scan takes minutes on
+        # the nationwide DB) as soon as cancel() returns True.
+        conn.set_progress_handler(lambda: 1 if cancel() else 0, 200000)
+    try:
+        _rebuild_lookup_body(conn, check)
+    except BaseException as e:
+        if cancel is not None:
+            conn.set_progress_handler(None, 0)   # must not interrupt the rollback
+        try:
+            if own_tx:
+                conn.rollback()
+            else:
+                conn.execute('ROLLBACK TO rebuild_lookup')
+                conn.execute('RELEASE rebuild_lookup')
+        except Exception:
+            pass
+        if (not isinstance(e, RebuildCancelled) and isinstance(e, sqlite3.OperationalError)
+                and cancel is not None and cancel()):
+            raise RebuildCancelled() from e      # statement interrupted by cancel
+        raise
+    if cancel is not None:
+        conn.set_progress_handler(None, 0)
+    if not own_tx:
+        conn.execute('RELEASE rebuild_lookup')
+    _lookup_available[DB_PATH] = True
+
+
+def _insert_chunked(conn, sql, rows, check):
+    for i in range(0, len(rows), _REBUILD_CHUNK):
+        check()
+        conn.executemany(sql, rows[i:i + _REBUILD_CHUNK])
+
+
+def _rebuild_lookup_body(conn, check):
     for stmt in (
         "DROP TABLE IF EXISTS gemeinde_index",
         "DROP TABLE IF EXISTS ortsteil_index",
@@ -526,6 +669,7 @@ def rebuild_lookup_tables(conn, log=None):
         "CREATE TABLE lookup_meta (key TEXT PRIMARY KEY, value TEXT)",
     ):
         conn.execute(stmt)
+    check()
 
     # One scan yields the Gemeinde directory AND the PLZ coverage per Bundesland
     # (rows without a Gemeinde count towards coverage too). Deliberately NO
@@ -535,10 +679,10 @@ def rebuild_lookup_tables(conn, log=None):
         "SELECT gemeinde_norm, bundesland, gemeinde, epsg, COUNT(*), "
         "       AVG(x), AVG(y), SUM(CASE WHEN plz IS NULL OR plz = '' THEN 1 ELSE 0 END) "
         "FROM addresses GROUP BY 1, 2, 3, 4").fetchall()
-    conn.executemany(
-        "INSERT INTO gemeinde_index VALUES (?,?,?,?,?,?,?,?)",
-        [(gn, _kurz_norm(gn), bl, g, n, cx, cy, e)
-         for gn, bl, g, e, n, cx, cy, _o in rows if gn])
+    check()
+    _insert_chunked(conn, "INSERT INTO gemeinde_index VALUES (?,?,?,?,?,?,?,?)",
+                    [(gn, _kurz_norm(gn), bl, g, n, cx, cy, e)
+                     for gn, bl, g, e, n, cx, cy, _o in rows if gn], check)
     bl_agg = {}
     for _gn, bl, _g, _e, n, _cx, _cy, ohne in rows:
         a = bl_agg.setdefault(bl, [0, 0])
@@ -546,20 +690,25 @@ def rebuild_lookup_tables(conn, log=None):
         a[1] += ohne or 0
     conn.executemany("INSERT INTO bundesland_index VALUES (?,?,?)",
                      [(bl, n, o) for bl, (n, o) in bl_agg.items()])
+    check()
 
     rows = conn.execute(
         "SELECT kreis, gemeinde_norm, bundesland, COUNT(*) FROM addresses "
         "WHERE kreis IS NOT NULL AND kreis <> '' AND gemeinde_norm <> '' "
         "GROUP BY 1, 2, 3").fetchall()
+    check()
     agg = {}
+    alias_cache = {}
     for kreis, gn, bl, n in rows:
-        a = _ortsteil_alias_norm(kreis)
+        a = alias_cache.get(kreis)
+        if a is None:
+            a = alias_cache[kreis] = _ortsteil_alias_norm(kreis)
         if not a or a == gn:
             continue
         key = (a, gn, bl)
         agg[key] = agg.get(key, 0) + n
-    conn.executemany("INSERT INTO ortsteil_index VALUES (?,?,?,?)",
-                     [(a, gn, bl, n) for (a, gn, bl), n in agg.items()])
+    _insert_chunked(conn, "INSERT INTO ortsteil_index VALUES (?,?,?,?)",
+                    [(a, gn, bl, n) for (a, gn, bl), n in agg.items()], check)
 
     for stmt in (
         "CREATE INDEX idx_gi_norm  ON gemeinde_index(gemeinde_norm)",
@@ -567,11 +716,33 @@ def rebuild_lookup_tables(conn, log=None):
         "CREATE INDEX idx_oi_alias ON ortsteil_index(alias_norm)",
     ):
         conn.execute(stmt)
-    total = conn.execute("SELECT COUNT(*) FROM addresses").fetchone()[0]
+    total = sum(a[0] for a in bl_agg.values())   # = COUNT(*), without a second scan
     conn.execute("INSERT INTO lookup_meta VALUES ('address_count', ?)", (str(total),))
     conn.execute("INSERT INTO lookup_meta VALUES ('schema_version', ?)",
                  (str(LOOKUP_SCHEMA_VERSION),))
-    _lookup_available[DB_PATH] = True
+    check()
+
+    # Planner statistics: without sqlite_stat1 SQLite may pick idx_bundesland
+    # (a whole state) instead of idx_gem_str / idx_plz_str. analysis_limit
+    # keeps ANALYZE fast on 20 million rows (approximate statistics are
+    # sufficient for the index choice); very old SQLite versions silently
+    # ignore the unknown PRAGMA.
+    conn.execute("PRAGMA analysis_limit = 1000")
+    try:
+        conn.execute("ANALYZE")
+    finally:
+        conn.execute("PRAGMA analysis_limit = 0")
+
+
+def _lookup_compatible(conn):
+    """True if the directory tables exist with the columns the search needs —
+    regardless of schema version or address count. Used when the directory
+    cannot be rebuilt (read-only DB, import running)."""
+    try:
+        return (_GEMEINDE_INDEX_COLS <= _columns(conn, 'gemeinde_index')
+                and _ORTSTEIL_INDEX_COLS <= _columns(conn, 'ortsteil_index'))
+    except Exception:
+        return False
 
 
 def lookup_tables_ready(conn):
@@ -593,10 +764,13 @@ def lookup_tables_ready(conn):
         return False
 
 
-def ensure_lookup_tables(log=None):
+def ensure_lookup_tables(log=None, cancel=None):
     """Check the directory once and (re)build it if needed. Returns True if
-    it was built. If the build fails (e.g. read-only DB), the search
-    continues with the previous logic."""
+    it was built. If the build is not possible (read-only DB, database locked
+    by a running import, cancelled), an existing directory with a compatible
+    structure keeps being used — even if it is stale or has an older schema
+    version; only without one does the search fall back to the previous
+    logic. The check is repeated on the next call in that case."""
     global _lookup_checked
     if _lookup_checked or not db_exists():
         return False
@@ -606,8 +780,16 @@ def ensure_lookup_tables(log=None):
             _lookup_checked = True
             _lookup_available[DB_PATH] = True
             return False
-        rebuild_lookup_tables(conn, log)
-        conn.commit()
+        try:
+            rebuild_lookup_tables(conn, log, cancel)
+            conn.commit()
+        except Exception:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            _lookup_available[DB_PATH] = _lookup_compatible(conn)
+            return False
         _lookup_checked = True
         if log:
             try:
@@ -615,23 +797,15 @@ def ensure_lookup_tables(log=None):
             except Exception:
                 pass
         return True
-    except Exception:
-        _lookup_available[DB_PATH] = False
-        return False
     finally:
         conn.close()
 
 
 def _has_lookup(conn):
-    """Fast, cached check whether the directory tables exist."""
+    """Fast, cached check whether usable directory tables exist."""
     v = _lookup_available.get(DB_PATH)
     if v is None:
-        try:
-            v = conn.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' "
-                "AND name='gemeinde_index'").fetchone() is not None
-        except Exception:
-            v = False
+        v = _lookup_compatible(conn)
         _lookup_available[DB_PATH] = v
     return v
 
@@ -663,12 +837,14 @@ def _plz_orte(conn, plz_n):
         return {(r[0] or '', r[1]) for r in conn.execute(
             "SELECT gemeinde_norm, bundesland FROM addresses WHERE plz = ? LIMIT 400",
             (plz_n,)).fetchall()}
-    except Exception:
+    except Exception as e:
+        if _is_locked_error(e):
+            raise
         return set()
 
 
 def _gemeinde_targets(conn, gemeinde_n, bundesland=None, _depth=0,
-                      raw=None, plz=None):
+                      raw=None, plz=None, plz_orte=None):
     """Target places for a place input, best first: list of
     (gemeinde_norm, bundesland, n). Order:
       1. places occurring under the given PLZ,
@@ -682,7 +858,8 @@ def _gemeinde_targets(conn, gemeinde_n, bundesland=None, _depth=0,
     _resolve_gemeinde), Ortsteile/Bezirke ('Blankenese' -> Hamburg,
     'Pankow' -> Berlin) as well as 'City-Ortsteil' ('Berlin-Mitte' -> Berlin).
     Returns None if no directory exists (the caller then uses the previous
-    logic), [] if the place is unknown."""
+    logic), [] if the place is unknown. plz_orte: result of _plz_orte(conn,
+    plz) if the caller already has it (saves the second query)."""
     if not gemeinde_n:
         return []
     if not _has_lookup(conn):
@@ -713,7 +890,8 @@ def _gemeinde_targets(conn, gemeinde_n, bundesland=None, _depth=0,
     if not rows and _depth == 0 and '-' in gemeinde_n:
         head = gemeinde_n.split('-')[0].strip()
         if head:
-            sub = _gemeinde_targets(conn, head, bundesland, _depth=1, plz=plz) or []
+            sub = _gemeinde_targets(conn, head, bundesland, _depth=1, plz=plz,
+                                    plz_orte=plz_orte) or []
             rows = [tuple(r) + ('',) for r in sub if r[2] >= _MIN_HYPHEN_CITY_SIZE]
     if not rows:
         return []
@@ -727,7 +905,8 @@ def _gemeinde_targets(conn, gemeinde_n, bundesland=None, _depth=0,
         namen = (r[3] or '').split(',')
         return 0 if any(_display_key(nm) == raw_key for nm in namen) else 1
 
-    plz_orte = _plz_orte(conn, plz) if plz else set()
+    if plz_orte is None:
+        plz_orte = _plz_orte(conn, plz) if plz else set()
     rows.sort(key=lambda r: (0 if (r[0], r[1]) in plz_orte else 1,
                              0 if (bundesland and r[1] == bundesland) else 1,
                              _display_hit(r),
@@ -735,29 +914,57 @@ def _gemeinde_targets(conn, gemeinde_n, bundesland=None, _depth=0,
     return [(r[0], r[1], r[2]) for r in rows[:8]]
 
 
-def db_exists():
+def db_state(timeout=5.0):
+    """State of the active database: 'ok' (addresses present), 'empty'
+    (no addresses / no address table), 'missing' (no file or not a
+    database) or 'locked' (another connection — usually a running import —
+    holds the lock; NOT the same as missing). timeout: busy timeout in
+    seconds while waiting for the lock."""
     if not os.path.exists(DB_PATH):
-        return False
+        return 'missing'
     try:
-        conn = get_connection()
-        # LIMIT 1 instead of COUNT(*) — on large DBs (millions of rows) a full
-        # COUNT scan is expensive and unnecessary; we only want to know whether
-        # any row exists at all.
-        row = conn.execute("SELECT 1 FROM addresses LIMIT 1").fetchone()
-        conn.close()
-        return row is not None
+        conn = sqlite3.connect(DB_PATH, timeout=timeout)
+        try:
+            # LIMIT 1 instead of COUNT(*) — on large DBs a full COUNT scan is
+            # expensive; we only want to know whether any row exists at all.
+            row = conn.execute("SELECT 1 FROM addresses LIMIT 1").fetchone()
+        finally:
+            conn.close()
+        return 'ok' if row is not None else 'empty'
+    except sqlite3.OperationalError as e:
+        if _is_locked_error(e):
+            return 'locked'
+        return 'empty' if 'no such table' in str(e).lower() else 'missing'
     except Exception:
-        return False
+        return 'missing'
 
 
-def _table_has_index(conn, index_name):
+def db_exists():
+    """True if the database contains addresses. A database LOCKED by a
+    running import also counts as present (it is not missing — searching it
+    raises DatabaseLocked, which the geocoding worker reports)."""
+    return db_state() in ('ok', 'locked')
+
+
+def count_addresses(bundesland, conn=None):
+    """Number of addresses of one Bundesland — a cheap COUNT(*) over
+    idx_bundesland instead of get_db_stats() over the whole DB. 0 if the DB
+    or the table does not exist."""
+    own = conn is None
+    if own:
+        if not os.path.exists(DB_PATH):
+            return 0
+        conn = sqlite3.connect(DB_PATH)
     try:
-        r = conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='index' AND name=?",
-            (index_name,)).fetchone()
-        return r is not None
-    except Exception:
-        return False
+        return conn.execute("SELECT COUNT(*) FROM addresses WHERE bundesland = ?",
+                            (bundesland,)).fetchone()[0]
+    except sqlite3.OperationalError as e:
+        if 'no such table' in str(e).lower():
+            return 0
+        raise
+    finally:
+        if own:
+            conn.close()
 
 
 def get_db_stats(db_path=None):
@@ -918,8 +1125,11 @@ def record_plz_meta(conn, bundesland, info, replace):
                   info.get('quelle_key')))
 
 
-def resolver_info(resolver, source, field, layername=None):
-    """Helper for the import workers: PLZ meta info from a resolver."""
+def resolver_info(resolver, source=None, field=None, layername=None):
+    """Helper for the import workers: PLZ meta info from a resolver. The
+    resolvers of plz_resolver (ResolverSession) describe themselves via
+    info(); source/field/layername are only used for a resolver without
+    info() (legacy callers) and may be omitted: resolver_info(resolver)."""
     if resolver is None:
         return None
     if hasattr(resolver, 'info'):           # ResolverSession (plz_resolver)
@@ -955,19 +1165,25 @@ def save_source_meta(bundesland, db_path=None, **fields):
         conn.close()
 
 
-def diagnose_search(strasse, plz='', gemeinde='', bundesland=None):
+def diagnose_search(strasse, plz='', gemeinde='', bundesland=None, conn=None,
+                    detail=None):
     """Explain why a local search returns no hit. Returns a short
     diagnostic string (for the geocoding log). Checks step by step:
     DB present → Bundesland in DB → Gemeinde in DB (in the Bundesland)
-    → street in the Gemeinde."""
-    if not db_exists():
-        return 'Keine lokale Datenbank vorhanden'
+    → street in the Gemeinde.
 
-    conn = get_connection()
-    _ensure_indexes(conn)
+    conn: optional open connection (the geocoding worker reuses its own).
+    detail: optional callback for the technical details of an unexpected
+    error (the returned text then only names the cause in short)."""
+    own = conn is None
+    if own:
+        if not db_exists():
+            return 'Keine lokale Datenbank vorhanden'
+        conn = get_connection()
     try:
+        _ensure_indexes(conn)
         gemeinde_n = _core_gemeinde(gemeinde) if gemeinde else ''
-        plz_n      = (plz or '').strip()
+        plz_n      = normalize_plz(plz)
         strasse_n, _ = _extract_hausnummer(normalize(strasse))
 
         # Bundesland in the DB?
@@ -994,44 +1210,57 @@ def diagnose_search(strasse, plz='', gemeinde='', bundesland=None):
             if hit is None:
                 # Does the Gemeinde exist under a similar name? A range query
                 # on the prefix uses the gemeinde_norm index (no '%…%' scan).
-                prefix = _safe_prefix(gemeinde_n)
+                prefix = _safe_prefix(gemeinde_n, split=False)
                 sample = []
                 if prefix:
                     sample = conn.execute(
                         "SELECT DISTINCT gemeinde FROM addresses "
                         "WHERE gemeinde_norm >= ? AND gemeinde_norm < ? LIMIT 3",
-                        [prefix, prefix + '\uffff']).fetchall()
+                        [prefix, prefix + '￿']).fetchall()
                 hint = ''
                 if sample:
-                    namen = ', '.join(r['gemeinde'] for r in sample)
+                    namen = ', '.join(r[0] for r in sample)
                     hint = f' – ähnlich: {namen}'
                 return f'Ort „{gemeinde}“ ist in der lokalen Datenbank nicht enthalten{hint}'
             gemeinde_n = resolved   # use the resolved DB name for the street check
 
         # Street in the Gemeinde (or, if no Gemeinde, in the PLZ)?
-        # ss/ß-robust prefix so that "Grosse" also finds "Große…".
+        # ss/ß-robust prefix so that "Grosse" also finds "Große…"; range form
+        # instead of LIKE so that idx_gem_str / idx_plz_str is used.
         pfx = _safe_prefix(strasse_n, 8)
         if strasse_n and pfx and (gemeinde_n or plz_n):
+            rng = [pfx, pfx + '￿']
             if gemeinde_n:
                 hit = conn.execute(
                     "SELECT 1 FROM addresses WHERE gemeinde_norm = ? "
-                    "AND strasse_norm LIKE ? LIMIT 1",
-                    (gemeinde_n, pfx + '%')).fetchone()
+                    "AND strasse_norm >= ? AND strasse_norm < ? LIMIT 1",
+                    [gemeinde_n] + rng).fetchone()
                 if hit is None:
                     return f'Straße „{strasse}“ in {gemeinde} nicht gefunden'
             else:
                 hit = conn.execute(
                     "SELECT 1 FROM addresses WHERE plz = ? "
-                    "AND strasse_norm LIKE ? LIMIT 1",
-                    (plz_n, pfx + '%')).fetchone()
+                    "AND strasse_norm >= ? AND strasse_norm < ? LIMIT 1",
+                    [plz_n] + rng).fetchone()
                 if hit is None:
                     return f'Straße „{strasse}“ in PLZ {plz_n} nicht gefunden'
 
         return 'Keine ausreichend ähnliche Adresse gefunden'
-    except Exception:
-        return 'Ursache konnte nicht ermittelt werden'
+    except Exception as e:
+        if detail:
+            try:
+                detail(f'Diagnose für „{strasse}, {plz} {gemeinde}“ fehlgeschlagen: '
+                       f'{type(e).__name__}: {e}')
+            except Exception:
+                pass
+        if _is_locked_error(e):
+            return 'Ursache nicht ermittelbar: Datenbank gesperrt (Import läuft)'
+        if isinstance(e, sqlite3.Error):
+            return 'Ursache nicht ermittelbar: Datenbankfehler'
+        return 'Ursache nicht ermittelbar: interner Fehler'
     finally:
-        conn.close()
+        if own:
+            conn.close()
 
 
 def init_db(conn):
@@ -1067,45 +1296,55 @@ def init_db(conn):
 # Prevents "Berlin" from yielding a hit in Hamburg.
 _GEMEINDE_MIN_SCORE = 0.75
 
+# Two rows of the same street/Gemeinde in different PLZ areas that lie
+# further apart than this (metres, UTM) are treated as two different streets
+# of the same name (e.g. 'Dorfstraße' in two Ortsteile) — not as one street
+# continuing across a PLZ border. See _prefer_input_plz().
+_PLZ_CONFLICT_DIST = 1000.0
 
-def _safe_prefix(s, maxlen=5):
+# Street similarity below which the second attempt (anchor words) is tried
+# in addition to the prefix search.
+_ANCHOR_RETRY_BELOW = 0.8
+
+
+def _safe_prefix(s, maxlen=5, split=True):
     """Return a street name prefix for the index-backed range query that is
-    robust against different ß/ss spellings.
+    robust against different spellings:
 
-    The DB stores strasse_norm in the official spelling (e.g. "große
-    straße"), but the input often uses "ss" ("grosse straße"). Since "ß"
-    (U+00DF) sorts after "ss", a prefix "gross" would exclude the DB entry
-    "große…" from the byte range [gross, gross+\\uffff). Therefore the prefix
-    is cut before the first ß/ss position — the Levenshtein ranking (which
-    unifies ß/ss anyway) then decides among the few remaining candidates.
-    Umlauts are left untouched (they are usually entered correctly) so as not
-    to reduce selectivity unnecessarily."""
+    * ß/ss: the DB stores strasse_norm in the official spelling (e.g. "große
+      straße"), but the input often uses "ss" ("grosse straße"). Since "ß"
+      (U+00DF) sorts after "ss", a prefix "gross" would exclude the DB entry
+      "große…" from the byte range [gross, gross+\\uffff). Therefore the
+      prefix is cut before the first ß/ss — also when the 'ss' straddles the
+      cut ('preus|senallee' → 'preu'), otherwise 'preus' would miss
+      'preußenallee'.
+    * separators (split=True): 'karl marx straße' and 'karl-marx-straße' (or
+      'dr otto …' and 'dr.-otto-…') must share the prefix, so it ends before
+      the first space/hyphen/dot/slash (unless that leaves fewer than two
+      characters).
+
+    The Levenshtein ranking (which unifies ß/ss and separators anyway) then
+    decides among the remaining candidates. Umlauts are left untouched (they
+    are usually entered correctly) so as not to reduce selectivity
+    unnecessarily."""
     if not s:
         return ''
-    p = s[:maxlen]
-    cut = len(p)
-    i = p.find('ß')
+    cut = min(len(s), maxlen)
+    if split:
+        m = re.search(r"[\s\-./']", s[:cut])
+        if m and m.start() >= 2:
+            cut = m.start()
+    i = s.find('ß')
     if i != -1:
         cut = min(cut, i)
-    j = p.find('ss')
+    j = s.find('ss')
     if j != -1:
         cut = min(cut, j)
-    return p[:cut]
+    return s[:cut]
 
 
-def search(strasse, hausnummer='', plz='', gemeinde='', bundesland=None,
-           max_results=5, fuzzy_threshold=0.30):
-    """
-    Search with strict Gemeinde check:
-    1. Index-backed range query (gemeinde_norm + strasse_norm prefix)
-    2. Levenshtein ranking; Gemeinde below _GEMEINDE_MIN_SCORE → candidate rejected
-    """
-    if not db_exists():
-        return []
-
-    conn = get_connection()
-    _ensure_indexes(conn)
-
+def _split_street_input(strasse, hausnummer):
+    """(normalized street, normalized house number) from the input fields."""
     if hausnummer:
         # House number comes as a separate field -> do NOT trim the street name.
         # Otherwise numbered street names ("Straße 10", "T 6", "An der B 5")
@@ -1118,14 +1357,82 @@ def search(strasse, hausnummer='', plz='', gemeinde='', bundesland=None,
         s2, hn2 = _extract_hausnummer(strasse_n)
         if hn2 and hn2 == hausnummer:
             strasse_n = s2
-    else:
-        # Combined input ("Lindenstraße 12", "Lindenstraße 12-14") ->
-        # split off the trailing house number (for ranges the first number counts).
-        strasse_n, hausnummer = _extract_hausnummer(normalize(strasse))
-    hausnr_n   = hausnummer or ''
+        return strasse_n, hausnummer
+    # Combined input ("Lindenstraße 12", "Lindenstraße 12-14", "Hauptstr.12")
+    # -> split off the trailing house number (for ranges the first number counts).
+    return _extract_hausnummer(normalize(strasse))
+
+
+def _anchor_words(strasse_n, maxn=3):
+    """Distinctive words of a street name for the second attempt (LIKE
+    '%word%'), longest first. Generic parts ('straße', 'am', …) are skipped.
+    For a word with ß/ss only the longest piece WITHOUT ß/ss is used, so that
+    'preussenallee' also finds 'preußenallee' (and vice versa)."""
+    words = []
+    for w in re.split(r"[\s\-./']+", strasse_n or ''):
+        if len(w) < 4 or _canonical(w) in _GENERIC_STREET_WORDS:
+            continue
+        piece = max(re.split(r'ß|ss', w), key=len)
+        if len(piece) >= 3 and '%' not in piece and '_' not in piece \
+                and piece not in words:
+            words.append(piece)
+    words.sort(key=len, reverse=True)
+    return words[:maxn]
+
+
+def search(strasse, hausnummer='', plz='', gemeinde='', bundesland=None,
+           max_results=5, fuzzy_threshold=0.30, conn=None):
+    """
+    Search with strict Gemeinde check:
+    1. Index-backed range query (gemeinde_norm + strasse_norm prefix)
+    2. Levenshtein ranking; Gemeinde below _GEMEINDE_MIN_SCORE → candidate rejected
+
+    conn: optional open connection (row_factory sqlite3.Row); it is reused
+    and NOT closed — the geocoding worker uses one connection per run.
+    Raises DatabaseLocked if the database is locked (import running).
+    """
+    own = conn is None
+    if own:
+        if not os.path.exists(DB_PATH):
+            return []
+        conn = get_connection()
+    try:
+        return _search(conn, strasse, hausnummer, plz, gemeinde, bundesland,
+                       max_results, fuzzy_threshold)
+    except sqlite3.OperationalError as e:
+        if _is_locked_error(e):
+            if isinstance(e, DatabaseLocked):
+                raise
+            raise DatabaseLocked(str(e)) from e
+        if 'no such table' in str(e).lower():
+            return []          # empty/new database without address table
+        raise
+    finally:
+        if own:
+            conn.close()
+
+
+def _search(conn, strasse, hausnummer, plz, gemeinde, bundesland,
+            max_results, fuzzy_threshold):
+    _ensure_indexes(conn)
+
+    strasse_n, hausnr_n = _split_street_input(strasse, hausnummer)
     gemeinde_n = _core_gemeinde(gemeinde) if gemeinde else ''
-    plz_n      = (plz or '').strip()
+    plz_n      = normalize_plz(plz)
     strasse_c  = _canonical(strasse_n)   # canonical comparison form of the input
+
+    # Street similarity per DISTINCT strasse_norm — computed once per search
+    # (stage 1 and the final ranking share it; up to 1,500 candidate rows
+    # belong to at most 8 streets).
+    street_sim_cache = {}
+
+    def street_sim(sn):
+        v = street_sim_cache.get(sn)
+        if v is None:
+            sc = _canonical(sn)
+            v = 1.0 - levenshtein(strasse_c, sc) / max(len(strasse_c), len(sc), 1)
+            street_sim_cache[sn] = v
+        return v
 
     # ── Fetch candidates (index-backed, without FTS) ─────────────────────────
     # The locality anchor is the Gemeinde (gemeinde_norm) OR the PLZ. A 5-digit
@@ -1133,13 +1440,17 @@ def search(strasse, hausnummer='', plz='', gemeinde='', bundesland=None,
     # guessed from the PLZ prefix — so the PLZ search sets NO Bundesland
     # filter. A pure range query over (gemeinde_norm|plz, strasse_norm) uses
     # idx_gem_str or idx_plz_str and returns within a few milliseconds even in
-    # large cities.
-    _fc_state = {'best': 0.0}   # best street similarity of the last call
+    # large cities. The Bundesland is written as '+bundesland' so that SQLite
+    # never prefers idx_bundesland (a whole state) — important on databases
+    # without ANALYZE statistics.
+    fc_best = [0.0]   # best street similarity of the last call
 
-    def _fetch_candidates(gem=None, use_plz=False, use_bundesland=True, bl=None):
+    def _fetch_candidates(gem=None, use_plz=False, use_bundesland=True, bl=None,
+                          words=None):
         # Build the locality WHERE clause. bl: explicit Bundesland (from the
-        # Gemeinde directory) instead of the guessed parameter.
-        _fc_state['best'] = 0.0
+        # Gemeinde directory) instead of the guessed parameter. words: anchor
+        # words for the second attempt (LIKE) instead of the prefix range.
+        fc_best[0] = 0.0
         loc_sql    = ""
         loc_params = []
         if gem:
@@ -1149,19 +1460,22 @@ def search(strasse, hausnummer='', plz='', gemeinde='', bundesland=None,
             loc_sql += " AND plz = ?"
             loc_params.append(plz_n)
         if bl:
-            loc_sql += " AND bundesland = ?"
+            loc_sql += " AND +bundesland = ?"
             loc_params.append(bl)
         elif use_bundesland and bundesland:
-            loc_sql += " AND bundesland = ?"
+            loc_sql += " AND +bundesland = ?"
             loc_params.append(bundesland)
 
-        prefix = _safe_prefix(strasse_n)
-        rng_sql, rng_params = "", []
-        if prefix:
-            # Range query instead of LIKE: uses idx_gem_str / idx_plz_str.
-            # _safe_prefix stops at ß/ss (Grosse/Große, Strasse/Straße).
-            rng_sql    = " AND strasse_norm >= ? AND strasse_norm < ?"
-            rng_params = [prefix, prefix + '\uffff']
+        str_sql, str_params = "", []
+        if words:
+            str_sql    = " AND (" + " OR ".join(["strasse_norm LIKE ?"] * len(words)) + ")"
+            str_params = [f'%{w}%' for w in words]
+        else:
+            prefix = _safe_prefix(strasse_n)
+            if prefix:
+                # Range query instead of LIKE: uses idx_gem_str / idx_plz_str.
+                str_sql    = " AND strasse_norm >= ? AND strasse_norm < ?"
+                str_params = [prefix, prefix + '￿']
 
         # Stage 1: fetch distinct street names in scope and rank them by
         # similarity. Prevents a common, alphabetically earlier street with
@@ -1170,34 +1484,32 @@ def search(strasse, hausnummer='', plz='', gemeinde='', bundesland=None,
         # "Karl-Lade-Straße"). Distinct street names are few even in large cities.
         street_rows = conn.execute(
             "SELECT DISTINCT strasse_norm FROM addresses WHERE 1=1"
-            + loc_sql + rng_sql + " LIMIT 5000",
-            loc_params + rng_params).fetchall()
-        if not street_rows:
-            return []
+            + loc_sql + str_sql + " LIMIT 5000",
+            loc_params + str_params).fetchall()
         ranked = []
         for r in street_rows:
-            sn = r['strasse_norm'] or ''
-            sc = _canonical(sn)
-            s_sc = 1.0 - levenshtein(strasse_c, sc) / max(len(strasse_c), len(sc), 1)
+            sn = r[0] or ''
+            s_sc = street_sim(sn)
             if s_sc >= fuzzy_threshold:
                 ranked.append((s_sc, sn))
         if not ranked:
             return []
         ranked.sort(key=lambda t: t[0], reverse=True)
-        _fc_state['best'] = ranked[0][0]
+        fc_best[0] = ranked[0][0]
         top_streets = [sn for _, sn in ranked[:8]]
 
         # Stage 2: fetch only the rows of the best streets. The ordering puts the
-        # best street (and, if given, the exactly matching house number) first
-        # so it is not cut off by the limit.
+        # best street, the exactly matching house number and the given PLZ
+        # first so they are not cut off by the limit.
         ph = ",".join("?" * len(top_streets))
         order_sql    = " ORDER BY CASE WHEN strasse_norm = ? THEN 0 ELSE 1 END"
         order_params = [top_streets[0]]
         if hausnr_n:
-            order_sql += (", CASE WHEN replace(lower(hausnummer)"
-                          " || coalesce(lower(hausnr_zusatz),''),' ','') = ?"
-                          " THEN 0 ELSE 1 END")
+            order_sql += f", CASE WHEN {_ROW_HN_SQL} = ? THEN 0 ELSE 1 END"
             order_params.append(hausnr_n)
+        if plz_n:
+            order_sql += ", CASE WHEN plz = ? THEN 0 ELSE 1 END"
+            order_params.append(plz_n)
         return conn.execute(
             "SELECT * FROM addresses WHERE 1=1" + loc_sql
             + f" AND strasse_norm IN ({ph})" + order_sql + " LIMIT 1500",
@@ -1205,6 +1517,9 @@ def search(strasse, hausnummer='', plz='', gemeinde='', bundesland=None,
 
     candidates = []
     hinweis    = ''
+    plz_orte   = _plz_orte(conn, plz_n) if plz_n else set()
+    # Places for the second attempt: (gemeinde_norm, Bundesland or None).
+    anchor_targets = []
     if strasse_n:
         # 1) Gemeinde known → Gemeinde-based. The Gemeinde directory returns
         #    the target places in a sensible order (matching Bundesland,
@@ -1213,7 +1528,7 @@ def search(strasse, hausnummer='', plz='', gemeinde='', bundesland=None,
         #    Ortsteile ('Blankenese' → Hamburg) and 'Berlin-Mitte'.
         if gemeinde_n:
             targets = _gemeinde_targets(conn, gemeinde_n, bundesland,
-                                        raw=gemeinde, plz=plz_n)
+                                        raw=gemeinde, plz=plz_n, plz_orte=plz_orte)
             # Did the user write a distinguishing suffix ('Frankfurt (Oder)')?
             # Then the place is not ambiguous.
             zusatz = (_display_key(gemeinde)
@@ -1228,6 +1543,7 @@ def search(strasse, hausnummer='', plz='', gemeinde='', bundesland=None,
                         candidates = _fetch_candidates(gem=gemeinde_n)
                 if not candidates and bundesland:
                     candidates = _fetch_candidates(gem=gemeinde_n, use_bundesland=False)
+                anchor_targets = [(gemeinde_n, None)]
             else:
                 # Check target places in order; the place with the BEST street
                 # hit wins (not the first one with any fuzzy candidate):
@@ -1238,16 +1554,17 @@ def search(strasse, hausnummer='', plz='', gemeinde='', bundesland=None,
                 # Bundesland, the choice stays restricted to those (a place
                 # „Halle, NRW" must not end up in Halle (Saale) just because
                 # the street exists there).
-                plz_orte = _plz_orte(conn, plz_n)
                 passend  = [t for t in targets
                             if (t[0], t[1]) in plz_orte or (bundesland and t[1] == bundesland)]
                 auswahl  = passend or targets
+                anchor_targets = ([(gn, bl) for gn, bl, _n in auswahl]
+                                  or [(gemeinde_n, None)])
                 best = None   # (street_score, candidates, gemeinde_norm, bundesland)
                 for gn, bl, _n in auswahl:
                     cand = _fetch_candidates(gem=gn, bl=bl)
                     if not cand:
                         continue
-                    sc = _fc_state['best']
+                    sc = fc_best[0]
                     if best is None or sc > best[0] + 1e-9:
                         best = (sc, cand, gn, bl)
                     if sc >= 0.95:
@@ -1272,110 +1589,85 @@ def search(strasse, hausnummer='', plz='', gemeinde='', bundesland=None,
         if not candidates and not gemeinde_n and not plz_n:
             candidates = _fetch_candidates()
 
-    # ── Second attempt: only if the prefix search came up EMPTY and a Gemeinde
-    # is known (then limited to that town, no nationwide scan). Anchors on the
-    # longest distinctive word of the street name — catches cases where the
-    # beginning differs (e.g. "Karl-Renner-Str." vs. official "Dr.-Karl-Renner-Str.",
-    # "Sankt-Anna-Str." vs. "St.-Anna-Str."). Runs rarely and only over the
-    # few rows of one town.
-    if not candidates and gemeinde_n and strasse_n:
-        woerter = [w for w in re.split(r'[-\s]+', strasse_n)
-                   if len(w) >= 4 and _canonical(w) not in _GENERIC_STREET_WORDS]
+    # ── Second attempt: if the prefix search came up EMPTY or only with a weak
+    # street match, and a Gemeinde is known (then limited to that town, no
+    # nationwide scan). Anchors on the distinctive words of the street name —
+    # catches cases where the beginning differs (e.g. "Karl-Renner-Str." vs.
+    # official "Dr.-Karl-Renner-Str.", "Sankt-Anna-Str." vs. "St.-Anna-Str.").
+    # The matching street names are ranked by similarity exactly like in
+    # stage 1 (an unordered LIMIT used to return "Karl-Liebknecht-Straße" for
+    # "Karl Marx Str."); the better of both attempts wins. The Bundesland
+    # comes from the Gemeinde directory, never from the PLZ guess (14467
+    # Potsdam is not in Berlin).
+    cand_best = (max(street_sim(r['strasse_norm'] or '') for r in candidates)
+                 if candidates else 0.0)
+    if cand_best < _ANCHOR_RETRY_BELOW and anchor_targets and strasse_n:
+        woerter = _anchor_words(strasse_n)
         if woerter:
-            anker = max(woerter, key=len)   # in DB spelling (with ß), matches strasse_norm
-            sql    = "SELECT * FROM addresses WHERE gemeinde_norm = ?"
-            params = [gemeinde_n]
-            if bundesland:
-                sql += " AND bundesland = ?"
-                params.append(bundesland)
-            sql += " AND strasse_norm LIKE ? LIMIT 400"
-            params.append(f'%{anker}%')
-            candidates = conn.execute(sql, params).fetchall()
-
-    conn.close()
+            best = None
+            for gn, bl in anchor_targets:
+                cand = _fetch_candidates(gem=gn, bl=bl, use_bundesland=False,
+                                         words=woerter)
+                if cand and (best is None or fc_best[0] > best[0] + 1e-9):
+                    best = (fc_best[0], cand, gn)
+            if best is not None and best[0] > cand_best + 1e-9:
+                candidates, gemeinde_n = best[1], best[2]
 
     if not candidates:
         return []
 
     # ── Step 3: Levenshtein ranking ───────────────────────────────────────────
-    scored = []
-    for row in candidates:
-        row_strasse_n  = row['strasse_norm'] or ''
-        row_gemeinde_n = row['gemeinde_norm'] or ''
+    gem_c     = _canon_gem(gemeinde_n) if gemeinde_n else ''
+    gem_cache = {}
 
-        # Determine the PLZ match up front — an exact PLZ is unique nationwide
-        # and already secures the locality, even if the place name differs.
-        # 'plz_usable' distinguishes: the DB row HAS a PLZ (then the user's PLZ
-        # can be confirmed) vs. a DB row without PLZ (common for ALKIS without
-        # PLZ intersection) — then the PLZ is treated neutrally, not penalized.
-        row_plz    = (row['plz'] or '').strip()
-        plz_usable = bool(plz_n and row_plz)
-        plz_match  = bool(plz_usable and plz_n == row_plz)
-
-        # Gemeinde: hard minimum — reject only if the Gemeinde matches too
-        # weakly AND the PLZ does not match exactly.
-        if gemeinde_n:
-            gem_c     = _canon_gem(gemeinde_n)
-            row_gem_c = _canon_gem(row_gemeinde_n)
+    def gem_sim(row_gn):
+        v = gem_cache.get(row_gn)
+        if v is None:
+            row_gem_c = _canon_gem(row_gn)
             if gem_c == row_gem_c:
-                g_score = 1.0
+                v = 1.0
             elif gem_c and (gem_c in row_gem_c or row_gem_c in gem_c):
-                g_score = 0.9
+                v = 0.9
             else:
-                g_lev   = levenshtein(gem_c, row_gem_c)
-                g_maxl  = max(len(gem_c), len(row_gem_c), 1)
-                g_score = 1.0 - (g_lev / g_maxl)
-            if g_score < _GEMEINDE_MIN_SCORE and not plz_match:
-                continue   # wrong town and no matching PLZ → reject
-        else:
-            g_score = 0.5
+                v = 1.0 - (levenshtein(gem_c, row_gem_c)
+                           / max(len(gem_c), len(row_gem_c), 1))
+            gem_cache[row_gn] = v
+        return v
 
-        # Street: Levenshtein on the canonical form (hyphen/ß/abbreviations
-        # unified) so that e.g. "St.-Anna-Str." and "Sankt Anna Straße" are
-        # recognized as nearly identical.
-        row_strasse_c = _canonical(row_strasse_n)
-        lev     = levenshtein(strasse_c, row_strasse_c)
-        maxl    = max(len(strasse_c), len(row_strasse_c), 1)
-        s_score = 1.0 - (lev / maxl)
+    hn_cache = {}
 
-        if s_score < fuzzy_threshold:
-            continue
-
-        # House number
-        hn_score = 0.0
-        if hausnr_n and row['hausnummer']:
-            row_hn = re.sub(r'\s+', '',
-                (row['hausnummer'] + (row['hausnr_zusatz'] or '')).lower())
+    def hn_sim(hn, zusatz):
+        key = (hn, zusatz)
+        v = hn_cache.get(key)
+        if v is None:
+            row_hn = _row_hn_key(hn, zusatz)
+            v = 0.0
             if hausnr_n == row_hn:
-                hn_score = 1.0
-            elif (row_hn.startswith(hausnr_n)
-                  and row_hn[len(hausnr_n):].isalpha()):
-                # Only a letter suffix counts as a partial hit ("12" ->
-                # "12a"). An additional digit ("1" -> "10", "12", "13") is
-                # a DIFFERENT house number and must not get a bonus.
-                hn_score = 0.5
+                v = 1.0
+            elif row_hn.startswith(hausnr_n):
+                # Only a letter suffix or a sub-number counts as a partial hit
+                # ("12" -> "12a", "12" -> "12/1"). An additional digit ("1" ->
+                # "10", "12", "13") is a DIFFERENT house number, no bonus.
+                rest = row_hn[len(hausnr_n):]
+                if rest.isalpha() or (rest[:1] == '/' and rest[1:].isdigit()):
+                    v = 0.5
+            elif '/' in hausnr_n and hausnr_n.split('/')[0] == row_hn:
+                v = 0.5        # "12/1" requested, only "12" present
+            hn_cache[key] = v
+        return v
 
-        # Tie the house number bonus to the street quality: a matching number
-        # on a clearly DIFFERENT street („Karl-Albert-Straße 1" for
-        # „Karl-Marx-Straße 1") must not overtake the correct street without
-        # that number. From 0.9 street similarity the bonus counts in full,
-        # below that it decreases linearly, below 0.6 not at all.
-        if s_score < 0.9:
-            hn_score *= max(0.0, (s_score - 0.6) / 0.3)
-
-        plz_score = 1.0 if plz_match else 0.0
-
-        # Total score with dynamic weights. Base weights: street 0.45,
-        # house number 0.25, Gemeinde 0.15, PLZ 0.15. If an input field is
-        # missing, its weight is redistributed instead of capping the score:
-        #   • no (confirmable) PLZ  -> weight goes to street/Gemeinde. This also
-        #     applies if the DB row has no PLZ: a correct address is then not
-        #     downgraded just because the data contains no PLZ.
-        #   • no house number given -> weight goes to the street (it is then the
-        #     decisive field; Gemeinde/PLZ only confirm and do NOT lift a weak
-        #     street hit).
-        # This way a clean street hit without house number reads "Exakt", while
-        # a weak street hit stays "Unsicher".
+    # Total score with dynamic weights. Base weights: street 0.45,
+    # house number 0.25, Gemeinde 0.15, PLZ 0.15. If an input field is
+    # missing, its weight is redistributed instead of capping the score:
+    #   • no (confirmable) PLZ  -> weight goes to street/Gemeinde. This also
+    #     applies if the DB row has no PLZ: a correct address is then not
+    #     downgraded just because the data contains no PLZ.
+    #   • no house number given -> weight goes to the street (it is then the
+    #     decisive field; Gemeinde/PLZ only confirm and do NOT lift a weak
+    #     street hit).
+    # This way a clean street hit without house number reads "Exakt", while
+    # a weak street hit stays "Unsicher".
+    def _weights(plz_usable):
         w_str, w_hn, w_gem, w_plz = 0.45, 0.25, 0.15, 0.15
         if not plz_usable:
             w_str += 0.10
@@ -1387,16 +1679,72 @@ def search(strasse, hausnummer='', plz='', gemeinde='', bundesland=None,
             if w_gem > 0.15:                 # revert the Gemeinde weight raised
                 w_str += w_gem - 0.15        # earlier (for lack of PLZ) in favour
                 w_gem = 0.15                 # of the street
+        return w_str, w_hn, w_gem, w_plz
+    weights = {True: _weights(True), False: _weights(False)}
+
+    has_herkunft = 'plz_herkunft' in candidates[0].keys()
+    scored = []
+    for row in candidates:
+        # Determine the PLZ match up front — an exact PLZ is unique nationwide
+        # and already secures the locality, even if the place name differs.
+        # 'plz_usable' distinguishes: the DB row HAS a PLZ (then the user's PLZ
+        # can be confirmed) vs. a DB row without PLZ (common for ALKIS without
+        # PLZ intersection) — then the PLZ is treated neutrally, not penalized.
+        # A PLZ only derived from PLZ areas (plz_herkunft 'gebiet') that
+        # differs from the input is treated neutrally as well: near an area
+        # border it may simply be wrong. An official PLZ mismatch stays one.
+        row_plz    = (row['plz'] or '').strip()
+        plz_usable = bool(plz_n and row_plz)
+        plz_match  = bool(plz_usable and plz_n == row_plz)
+        if (plz_usable and not plz_match and has_herkunft
+                and row['plz_herkunft'] == 'gebiet'):
+            plz_usable = False
+
+        # Gemeinde: hard minimum — reject only if the Gemeinde matches too
+        # weakly AND the PLZ does not match exactly.
+        if gemeinde_n:
+            g_score = gem_sim(row['gemeinde_norm'] or '')
+            if g_score < _GEMEINDE_MIN_SCORE and not plz_match:
+                continue   # wrong town and no matching PLZ → reject
+        else:
+            g_score = 0.5
+
+        # Street: Levenshtein on the canonical form (hyphen/ß/abbreviations
+        # unified) so that e.g. "St.-Anna-Str." and "Sankt Anna Straße" are
+        # recognized as nearly identical.
+        s_score = street_sim(row['strasse_norm'] or '')
+        if s_score < fuzzy_threshold:
+            continue
+
+        # House number
+        hn_score = 0.0
+        if hausnr_n and row['hausnummer']:
+            hn_score = hn_sim(row['hausnummer'], row['hausnr_zusatz'])
+
+        # Tie the house number bonus to the street quality: a matching number
+        # on a clearly DIFFERENT street („Karl-Albert-Straße 1" for
+        # „Karl-Marx-Straße 1") must not overtake the correct street without
+        # that number. From 0.9 street similarity the bonus counts in full,
+        # below that it decreases linearly, below 0.6 not at all.
+        if s_score < 0.9:
+            hn_score *= max(0.0, (s_score - 0.6) / 0.3)
+
+        plz_score = 1.0 if plz_match else 0.0
+        w_str, w_hn, w_gem, w_plz = weights[plz_usable]
         total = (s_score   * w_str
                + hn_score  * w_hn
                + g_score   * w_gem
                + plz_score * w_plz)
 
         rd = dict(row)
-        rd['_hn_score'] = hn_score
+        rd['_hn_score']     = hn_score
+        rd['_plz_match']    = plz_match
+        rd['_plz_conflict'] = plz_usable and not plz_match
         scored.append((total, rd))
 
     scored.sort(key=lambda x: x[0], reverse=True)
+    if plz_n:
+        scored = _prefer_input_plz(scored)
 
     results = []
     for score, row in scored[:max_results]:
@@ -1405,7 +1753,7 @@ def search(strasse, hausnummer='', plz='', gemeinde='', bundesland=None,
             'score_label': _score_label(score),
             'hinweis':     hinweis,
             'strasse':     row['strasse'],
-            'hausnummer':  (row['hausnummer'] or '') + (row['hausnr_zusatz'] or ''),
+            'hausnummer':  _row_hausnummer(row['hausnummer'], row['hausnr_zusatz']),
             'hn_requested': bool(hausnr_n),
             'hn_score':    row.get('_hn_score', 0.0),
             'plz':         row['plz'] or '',
@@ -1420,8 +1768,50 @@ def search(strasse, hausnummer='', plz='', gemeinde='', bundesland=None,
     return results
 
 
+def _prefer_input_plz(scored):
+    """An exact house number in a DIFFERENT PLZ must not beat the street in
+    the given PLZ when the two are separate streets of the same name (e.g.
+    'Dorfstraße' in two Ortsteile of one Gemeinde): rows of the top street
+    whose PLZ contradicts the input and that lie more than _PLZ_CONFLICT_DIST
+    away from every row of that street inside the given PLZ are moved behind
+    the other rows. Rows close by belong to the same street continuing
+    across the PLZ border (input PLZ slightly off) and keep their rank.
+    Scores are not changed, only the order. scored: sorted [(total, row)]."""
+    top = scored[0][1]
+    if not top['_plz_conflict']:
+        return scored
+    key = (top['strasse_norm'], top['gemeinde_norm'])
+    inside = [r for _t, r in scored
+              if r['_plz_match'] and (r['strasse_norm'], r['gemeinde_norm']) == key]
+    if not inside:
+        return scored
+    inside = inside[:500]
+    limit2 = _PLZ_CONFLICT_DIST ** 2
+
+    def far(r):
+        if r['x'] is None or r['y'] is None:
+            return False
+        e = _fix_epsg(r['epsg'])
+        d2 = [(r['x'] - o['x']) ** 2 + (r['y'] - o['y']) ** 2 for o in inside
+              if _fix_epsg(o['epsg']) == e and o['x'] is not None and o['y'] is not None]
+        return bool(d2) and min(d2) > limit2
+
+    front, demoted = [], []
+    reached = False      # first row of the street inside the PLZ seen?
+    for item in scored:
+        r = item[1]
+        if not reached and r['_plz_match'] and (r['strasse_norm'], r['gemeinde_norm']) == key:
+            reached = True
+        if (not reached and r['_plz_conflict']
+                and (r['strasse_norm'], r['gemeinde_norm']) == key and far(r)):
+            demoted.append(item)
+        else:
+            front.append(item)
+    return front + demoted
+
+
 def street_representative(strasse_norm, gemeinde_norm, bundesland=None,
-                          plz=None, hausnummer=''):
+                          plz=None, hausnummer='', conn=None):
     """Return a representative point for a street when the requested house
     number does not exist (or none was given). Instead of an arbitrary house
     number of the street (previous behaviour):
@@ -1433,27 +1823,44 @@ def street_representative(strasse_norm, gemeinde_norm, bundesland=None,
         of all points of the street ('center'); this guarantees the point
         lies on the street, even if it is curved.
 
+    If both Gemeinde and PLZ are known, the street is first restricted to the
+    PLZ as well — streets of the same name in two Ortsteile (or in two places
+    of the same name) must not be merged; without rows in that PLZ the
+    Gemeinde alone decides.
+
+    conn: optional open connection (reused, not closed).
     Returns dict(kind, x, y, epsg, hausnummer, count) or None."""
     if not strasse_norm:
         return None
-    sql    = ("SELECT hausnummer, hausnr_zusatz, x, y, epsg FROM addresses "
-              "WHERE strasse_norm = ?")
-    params = [strasse_norm]
+    plz = normalize_plz(plz)
+    base_sql    = ("SELECT hausnummer, hausnr_zusatz, x, y, epsg FROM addresses "
+                   "WHERE strasse_norm = ?")
+    attempts = []
     if gemeinde_norm:
-        sql += " AND gemeinde_norm = ?"
-        params.append(gemeinde_norm)
+        if plz:
+            attempts.append((" AND gemeinde_norm = ? AND plz = ?", [gemeinde_norm, plz]))
+        attempts.append((" AND gemeinde_norm = ?", [gemeinde_norm]))
     elif plz:
-        sql += " AND plz = ?"
-        params.append(plz)
-    if bundesland:
-        sql += " AND bundesland = ?"
-        params.append(bundesland)
-    sql += " LIMIT 5000"
-    conn = get_connection()
+        attempts.append((" AND plz = ?", [plz]))
+    else:
+        attempts.append(("", []))
+    own = conn is None
+    if own:
+        conn = get_connection()
     try:
-        rows = conn.execute(sql, params).fetchall()
+        rows = []
+        for loc_sql, loc_params in attempts:
+            sql    = base_sql + loc_sql
+            params = [strasse_norm] + loc_params
+            if bundesland:
+                sql += " AND +bundesland = ?"
+                params.append(bundesland)
+            rows = conn.execute(sql + " LIMIT 5000", params).fetchall()
+            if rows:
+                break
     finally:
-        conn.close()
+        if own:
+            conn.close()
     if not rows:
         return None
 
@@ -1473,7 +1880,7 @@ def street_representative(strasse_norm, gemeinde_norm, bundesland=None,
             r = best[1]
             return {'kind': 'nearest', 'x': r['x'], 'y': r['y'],
                     'epsg': _fix_epsg(r['epsg']),
-                    'hausnummer': (r['hausnummer'] or '') + (r['hausnr_zusatz'] or ''),
+                    'hausnummer': _row_hausnummer(r['hausnummer'], r['hausnr_zusatz']),
                     'count': len(rows)}
 
     cx = sum(r['x'] for r in rows) / len(rows)
@@ -1481,7 +1888,7 @@ def street_representative(strasse_norm, gemeinde_norm, bundesland=None,
     r  = min(rows, key=lambda r: (r['x'] - cx) ** 2 + (r['y'] - cy) ** 2)
     return {'kind': 'center', 'x': r['x'], 'y': r['y'],
             'epsg': _fix_epsg(r['epsg']),
-            'hausnummer': (r['hausnummer'] or '') + (r['hausnr_zusatz'] or ''),
+            'hausnummer': _row_hausnummer(r['hausnummer'], r['hausnr_zusatz']),
             'count': len(rows)}
 
 
@@ -1501,7 +1908,7 @@ def _score_label(score):
     else: return 'Schwach'
 
 
-def locate_locality(plz='', gemeinde='', bundesland=None):
+def locate_locality(plz='', gemeinde='', bundesland=None, conn=None):
     """Return a representative point for a partial input WITHOUT a (matching)
     street: the centroid (mean) of all address points of a PLZ or a Gemeinde.
     This sets a point even for a bare PLZ or place/town input instead of a
@@ -1511,13 +1918,16 @@ def locate_locality(plz='', gemeinde='', bundesland=None):
     Gemeinde name) and the largest group is taken, so that neither UTM zones
     (25832/25833) nor same-named places with different spellings get mixed.
 
+    conn: optional open connection (reused, not closed).
     Returns dict (x, y, epsg, bundesland, level, label, count) or None.
     """
-    plz_n      = (plz or '').strip()
+    plz_n      = normalize_plz(plz)
     gemeinde_n = _core_gemeinde(gemeinde) if gemeinde else ''
     if not plz_n and not gemeinde_n:
         return None
-    conn = get_connection()
+    own = conn is None
+    if own:
+        conn = get_connection()
     try:
         # PLZ first — unique nationwide and usually smaller in area than a place.
         if plz_n:
@@ -1548,7 +1958,7 @@ def locate_locality(plz='', gemeinde='', bundesland=None):
                    "FROM addresses WHERE gemeinde_norm = ?")
             params = [gemeinde_n]
             if bundesland:
-                sql += " AND bundesland = ?"
+                sql += " AND +bundesland = ?"
                 params.append(bundesland)
             sql += " GROUP BY gemeinde, epsg ORDER BY c DESC LIMIT 1"
             row = conn.execute(sql, params).fetchone()
@@ -1558,4 +1968,5 @@ def locate_locality(plz='', gemeinde='', bundesland=None):
                         'level': 2, 'label': 'Ort/Gemeinde (Schwerpunkt)', 'count': row['c']}
         return None
     finally:
-        conn.close()
+        if own:
+            conn.close()

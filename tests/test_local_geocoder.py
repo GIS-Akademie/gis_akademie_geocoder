@@ -23,7 +23,9 @@ def test_normalize(raw, expected):
 @pytest.mark.parametrize('raw, expected', [
     ('12', '12'), ('12 a', '12a'), ('7A', '7a'),
     ('12-14', '12'), ('12 - 14', '12'), ('12/14', '12'), ('12+14', '12'),
-    ('12a-c', '12a'), ('Nr. 7', '7'), ('Nr 7', '7'), ('3b/1', '3b'), ('', ''),
+    ('12a-c', '12a'), ('Nr. 7', '7'), ('Nr 7', '7'), ('', ''),
+    # sub-number (second number not larger): a different building, kept
+    ('3b/1', '3b/1'), ('12/1', '12/1'), ('12 / 1', '12/1'), ('1/1', '1/1'),
 ])
 def test_normalize_hausnummer(raw, expected):
     assert lg.normalize_hausnummer(raw) == expected

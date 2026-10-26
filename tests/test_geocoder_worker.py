@@ -205,10 +205,13 @@ def test_importance_does_not_raise_level():
 
 
 class _Resp:
+    status = 200
+    headers = {}
+
     def __init__(self, data):
         self._data = data
 
-    def read(self):
+    def read(self, *_a):
         import json
         return json.dumps(self._data).encode('utf-8')
 

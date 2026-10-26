@@ -397,7 +397,7 @@ class SourceUpdateWorker(QObject):
         cache = _sd.cache_dir_for(_lc.DB_PATH, bl)
         os.makedirs(cache, exist_ok=True)
         txt = os.path.join(cache, 'adressen_alkis.txt')
-        http = _sd.Http(_sd.user_agent(self.plugin_version), timeout=120)
+        http = _sd.make_http(_sd.user_agent(self.plugin_version), timeout=120)
         seen, etags, stand = set(), {}, []
         summe = {'adressen': 0, 'doppelt': 0, 'ohne_gemeinde': 0}
         try:

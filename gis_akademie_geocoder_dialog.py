@@ -54,30 +54,6 @@ def _fmt_int(n):
     return f'{n:,}'.replace(',', '.')
 
 
-def _qgis_proxies():
-    """Proxy from the QGIS network settings (Einstellungen → Optionen →
-    Netzwerk) for the plugin's downloads, or None (then the system settings
-    apply)."""
-    try:
-        from qgis.core import QgsNetworkAccessManager
-        from qgis.PyQt.QtNetwork import QNetworkProxy
-        from urllib.parse import quote
-        proxy = QgsNetworkAccessManager.instance().fallbackProxy()
-        types = getattr(QNetworkProxy, 'ProxyType', QNetworkProxy)
-        if proxy.type() not in (types.HttpProxy, types.HttpCachingProxy) or not proxy.hostName():
-            return None
-        auth = (f'{quote(proxy.user(), safe="")}:{quote(proxy.password(), safe="")}@'
-                if proxy.user() else '')
-        url = f'http://{auth}{proxy.hostName()}:{proxy.port() or 8080}'
-        return {'http': url, 'https': url}
-    except Exception:
-        return None
-
-
-def _apply_proxy():
-    _sd.set_proxies(_qgis_proxies())
-
-
 def _keep_until_finished(thread, worker):
     """A thread that does not stop in time is never terminated (a thread
     killed inside SQLite leaves the database locked and can hang QGIS). The
@@ -942,7 +918,6 @@ class GISAkademieGeocoderDialog(QDialog, FORM_CLASS):
             self._log('🔒 DSGVO-konformes Geocodieren: nur die lokale Datenbank, '
                       'keine Online-Abfrage.')
 
-        _apply_proxy()
         self._thread = QThread()
         self._worker = GeocoderWorker(
             self._rows, col_map, local_only=local_only,
@@ -1597,7 +1572,6 @@ class GISAkademieGeocoderDialog(QDialog, FORM_CLASS):
         running = self._import_running()
         meta = {} if running else (all_source_meta().get(bl) or {})
         adressen = (self._last_db_stats or {}).get(bl)
-        _apply_proxy()                     # for „Quelle prüfen“
         dlg = SourceEditDialog(self, bl, entry, plugin_version=PLUGIN_VERSION, standard=standard,
                                meta=meta, adressen=adressen, busy=running or self._geocoding_running())
         dlg.exec()
@@ -1644,7 +1618,6 @@ class GISAkademieGeocoderDialog(QDialog, FORM_CLASS):
             return
         self.btn_catalog.setEnabled(False)
         self.btn_catalog.setText('Prüfe …')
-        _apply_proxy()
         thread = QThread()                 # no parent: may outlive the dialog (see shutdown)
         worker = CatalogCheckWorker()
         worker.moveToThread(thread)
@@ -1684,7 +1657,6 @@ class GISAkademieGeocoderDialog(QDialog, FORM_CLASS):
             return
         self.tab_widget.setCurrentWidget(self.tab_admin)
         self.admin_scroll.ensureWidgetVisible(self.grp_import_progress)
-        _apply_proxy()
         self._set_import_running(True)
         self.import_log.clear()
         self.import_progress_bar.setMaximum(0)

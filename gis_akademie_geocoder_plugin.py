@@ -7,7 +7,8 @@ from qgis.core import QgsSettings, QgsApplication
 from .gis_akademie_geocoder_dialog import (GISAkademieGeocoderDialog, SETTINGS_KEY,
                                             PLZ_SETTINGS_KEY)
 from .local_geocoder import set_db_path
-from .source_downloader import set_user_catalog_path, set_online_catalog_path
+from .source_downloader import set_user_catalog_path, set_online_catalog_path, set_http_class
+from .qgis_network import QgisHttp
 from . import plz_resolver
 
 
@@ -58,6 +59,9 @@ class GISAkademieGeocoderPlugin:
             set_db_path(_default_db_path())
             self._db_warning = (f'Der gespeicherte Datenbankpfad {path} ist nicht erreichbar ({e}). '
                                 'Für diese Sitzung wird die Datenbank im QGIS-Profil verwendet.')
+        # All requests (sources, source list, Nominatim) through the network
+        # access of QGIS: its proxy, certificates and authentication apply.
+        set_http_class(QgisHttp)
         # Store user-defined sources (tab „Datenbank & Quellen“) in the QGIS
         # profile — there they survive plugin updates.
         set_user_catalog_path(_profile_file('sources_user.json'))

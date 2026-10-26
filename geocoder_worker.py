@@ -577,7 +577,8 @@ class GeocoderWorker(QObject):
     @staticmethod
     def _retry_after(err, default):
         try:
-            v = float(err.headers.get('Retry-After'))
+            hdrs = {k.lower(): v for k, v in (getattr(err, 'headers', None) or {}).items()}
+            v = float(hdrs.get('retry-after'))
             return min(max(v, 1.0), 120.0)
         except Exception:
             return default
@@ -590,7 +591,7 @@ class GeocoderWorker(QObject):
         for attempt in range(len(NOMINATIM_RETRY_DELAYS) + 1):
             try:
                 return self._nominatim_request(address)
-            except urllib.error.HTTPError as e:
+            except _sd.SourceError as e:
                 if (e.code == 429 and attempt < len(NOMINATIM_RETRY_DELAYS)
                         and not self._cancelled):
                     wait = self._retry_after(e, NOMINATIM_RETRY_DELAYS[attempt])
@@ -626,12 +627,11 @@ class GeocoderWorker(QObject):
             'countrycodes':   'de',      # hits abroad must not count as geocoded
         })
         url = f'https://nominatim.openstreetmap.org/search?{params}'
-        req = urllib.request.Request(url, headers={
-            'User-Agent': f'QGIS-GISAkademieGeocoderPlugin/{PLUGIN_VERSION} '
-                          '(wieschmann@gis-akademie.de)'
-        })
-        with _sd.open_url(req, 10) as resp:          # honours the QGIS proxy
-            data = json.loads(resp.read().decode('utf-8'))
+        # Same network access as the downloads (in QGIS: proxy, certificates)
+        http = _sd.make_http(f'QGIS-GISAkademieGeocoderPlugin/{PLUGIN_VERSION} '
+                             '(wieschmann@gis-akademie.de)', timeout=10)
+        _status, _h, body = http.get(url)
+        data = json.loads(body.decode('utf-8'))
         if not data:
             return self._empty_result()
         geo = data[0]

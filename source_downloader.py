@@ -122,22 +122,19 @@ CHUNK = 1024 * 256
 
 DEFAULT_USER_AGENT = 'QGIS-GISAkademieGeocoder/{version} (+https://gis-akademie.de)'
 
-# Proxy from the QGIS network settings ({'http': url, 'https': url}); set by the
-# plugin before network work starts. None = urllib default (environment/system).
-_PROXIES = None
+# Class for network access. In QGIS the plugin sets qgis_network.QgisHttp (proxy,
+# certificates and authentication of QGIS); outside QGIS (tests, tools) the
+# urllib variant Http below is used.
+_HTTP_CLASS = None
 
 
-def set_proxies(proxies):
-    global _PROXIES
-    _PROXIES = dict(proxies) if proxies else None
+def set_http_class(cls):
+    global _HTTP_CLASS
+    _HTTP_CLASS = cls
 
 
-def open_url(request, timeout):
-    """urlopen honouring the proxy from the QGIS settings."""
-    if _PROXIES:
-        return urllib.request.build_opener(urllib.request.ProxyHandler(_PROXIES)).open(
-            request, timeout=timeout)
-    return urllib.request.urlopen(request, timeout=timeout)
+def make_http(user_agent, timeout=60):
+    return (_HTTP_CLASS or Http)(user_agent, timeout)
 
 
 class Cancelled(Exception):
@@ -152,10 +149,12 @@ class SourceError(Exception):
     source has probably changed), 'konfiguration' (the catalog entry does not
     fit the service) or 'fehler'."""
 
-    def __init__(self, message, detail=None, kind='fehler'):
+    def __init__(self, message, detail=None, kind='fehler', code=None, headers=None):
         super().__init__(message)
         self.detail = detail
         self.kind = kind
+        self.code = code                 # HTTP status for server errors
+        self.headers = headers or {}     # response headers (e.g. Retry-After)
 
 
 def _n(x):
@@ -180,7 +179,7 @@ def _host(url):
     return urllib.parse.urlparse(url).netloc or url
 
 
-def _http_error(code, url):
+def _http_error(code, url, headers=None):
     host = _host(url)
     kind = 'fehler'
     if code in (404, 410):
@@ -199,7 +198,8 @@ def _http_error(code, url):
         kind = 'voruebergehend'
     else:
         msg = f'Der Server {host} meldet Fehler {code}.'
-    return SourceError(msg, detail=f'HTTP {code} bei {url}', kind=kind)
+    return SourceError(msg, detail=f'HTTP {code} bei {url}', kind=kind, code=code,
+                       headers={k.lower(): v for k, v in (headers or {}).items()})
 
 
 def _net_error(url, reason):
@@ -518,11 +518,12 @@ class Http:
     def _open(self, url, headers):
         """Open the connection; returns the response or (304, headers)."""
         try:
-            return open_url(self._request(url, headers), self.timeout)
+            return urllib.request.urlopen(self._request(url, headers), timeout=self.timeout)
         except urllib.error.HTTPError as e:
+            hdrs = {k.lower(): v for k, v in (e.headers or {}).items()}
             if e.code == 304:
-                return 304, {k.lower(): v for k, v in e.headers.items()}
-            raise _http_error(e.code, url) from e
+                return 304, hdrs
+            raise _http_error(e.code, url, hdrs) from e
         except urllib.error.URLError as e:
             raise _net_error(url, e.reason) from e
         except _NET_ERRORS as e:
@@ -1204,7 +1205,7 @@ def update_source(bundesland, db_path, prev_meta=None, force=False,
     if not t.automatic:                      # file on this computer
         return t.update(ctx)
 
-    ctx.http = http or Http(user_agent(user_agent_version, cat))
+    ctx.http = http or make_http(user_agent(user_agent_version, cat))
     ctx.cache = cache_dir_for(db_path, bundesland)
     os.makedirs(ctx.cache, exist_ok=True)
     ctx.detail(f'{bundesland}: Quelle {entry.get("url")} (Typ {entry["typ"]}), Cache {ctx.cache}')
@@ -1343,7 +1344,7 @@ def _fetch_online_catalog(http, user_agent_version, url):
     # update may move it, a newer online list may announce a new one)
     newer = alt if _iso_date(alt.get('stand')) > _iso_date(base.get('stand')) else base
     url = url or newer.get('katalog_url') or base.get('katalog_url') or DEFAULT_CATALOG_URL
-    http = http or Http(user_agent(user_agent_version, base), timeout=30)
+    http = http or make_http(user_agent(user_agent_version, base), timeout=30)
     headers = {}
     meta_alt = alt.get('_online') or {}
     if meta_alt.get('etag') and meta_alt.get('url') == url:
@@ -1727,7 +1728,7 @@ def _test_source(entry, http, user_agent_version):
     if t.test is None:
         return False, 'Manuelle Quellen werden nicht abgerufen.'
     if t.automatic:
-        http = http or Http(user_agent(user_agent_version), timeout=30)
+        http = http or make_http(user_agent(user_agent_version), timeout=30)
     return t.test(entry, http)
 
 

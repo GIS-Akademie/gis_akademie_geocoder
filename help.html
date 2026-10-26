@@ -319,7 +319,10 @@
     <h2>Geocodierung starten / Abbrechen</h2>
     <p><em>Geocodierung starten</em> arbeitet im Hintergrund — QGIS bleibt bedienbar. Das Protokoll
     zeigt für jede Adresse die verwendete Quelle und am Ende eine Zusammenfassung. <em>Abbrechen</em>
-    beendet den Lauf.</p>
+    beendet den Lauf; das Plugin fragt dann, ob das Teilergebnis gespeichert werden soll — als eigener
+    Layer mit der Endung <code>_teil</code>, ein vorhandener Layer gleichen Namens bleibt unverändert.</p>
+    <p>Während Daten in die Datenbank importiert werden (Reiter „Datenbank &amp; Quellen“), ist die
+    Datenbank gesperrt: Geocodieren und Aktualisieren schließen sich deshalb gegenseitig aus.</p>
     <div class="tip"><strong>Laufzeit:</strong> Lokale Adressen werden sofort verarbeitet. Nominatim
     braucht ca. 1,1 Sekunden je Adresse — 100 Adressen über Nominatim dauern also rund 2 Minuten.</div>
   </div>
@@ -495,10 +498,16 @@
     (er ist älter, und rund 66.000 Adressen fehlt die Koordinate).</p>
     <p>Außerdem schützt das Plugin den vorhandenen Bestand:</p>
     <ul>
-      <li>Liefert eine Quelle eine Webseite statt der Datei (z.&nbsp;B. bei Wartungsarbeiten) oder enthält
-        eine Datei keine Adressen, bleibt der bisherige Bestand des Landes erhalten.</li>
+      <li>Liefert eine Quelle eine Webseite statt der Datei (z.&nbsp;B. bei Wartungsarbeiten), bricht ein
+        Download vorzeitig ab oder enthält eine Datei keine Adressen, bleibt der bisherige Bestand des
+        Landes erhalten.</li>
       <li>Ein unvollständiger WFS-Download ersetzt nie einen vollständigen Bestand (siehe
         <a href="#reiter_db">Vollständigkeitsprüfung</a>).</li>
+      <li>Enthalten neue Daten weniger als die Hälfte der bisherigen Adressen eines Landes, werden sie
+        nicht übernommen — meist ist dann die Lieferung unvollständig. Sind sie wirklich richtig, übernimmt
+        sie <em>Auch ohne neue Daten erneut laden</em>.</li>
+      <li>Alle Dateien eines Landes werden gemeinsam übernommen: Scheitert eine davon oder wird
+        abgebrochen, bleibt der bisherige Bestand vollständig erhalten.</li>
       <li>Ein Fehler bei einem Land bricht die übrigen nicht ab.</li>
     </ul>
   </div>
@@ -774,7 +783,7 @@
     <table>
       <tr><th>Feld</th><th>Pflicht</th><th>Hinweis</th></tr>
       <tr><td>Straße</td><td>✅</td><td>Straßenname</td></tr>
-      <tr><td>Hausnummer</td><td>✅</td><td>Wird auf Plausibilität geprüft (1–4 Ziffern)</td></tr>
+      <tr><td>Hausnummer</td><td>✅</td><td>Angaben wie „12a“, „12-14“ oder „12;14“ werden in Nummer und Zusatz bzw. mehrere Adressen zerlegt; Werte mit mehr als 4 Ziffern (Flurstücks- statt Hausnummern) werden übergangen</td></tr>
       <tr><td>Hausnr.-Zusatz</td><td>–</td><td>z.&nbsp;B. „a“, „b“</td></tr>
       <tr><td>Postleitzahl</td><td>–</td><td></td></tr>
       <tr><td>Stadt / Ort</td><td>–</td><td>Bleibt dies leer, wird der Name des Bundeslands als Ort gespeichert (wie bei Berlin)</td></tr>
@@ -815,6 +824,8 @@
     <a href="#bundeslaender">Wie und wo die Daten abgerufen werden</a>) und die Quellenliste von GitHub. In
     abgeschotteten Netzen blockieren Proxy oder Firewall solche Abrufe oft. Möglichkeiten:</p>
     <ul>
+      <li>den Proxy in QGIS eintragen (<em>Einstellungen → Optionen → Netzwerk</em>) — das Plugin
+        übernimmt ihn für alle Abrufe,</li>
       <li>die IT bitten, diese Adressen freizugeben,</li>
       <li>die Datei auf anderem Weg beschaffen und auf der Detailseite als <em>Datei auf diesem Rechner</em>
         eintragen,</li>

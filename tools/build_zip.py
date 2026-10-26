@@ -14,11 +14,13 @@ upload validator and security scan, as of October 2026):
 
 The package contains the files tracked by git — without tests, tools and
 repository helper files. That way the content matches the repository (a rule of
-the plugin repository).
+the plugin repository); uncommitted changes, deleted or new (untracked) plugin
+files are therefore errors (--dirty allows a local test build).
 
 Usage:
     python tools/build_zip.py                 # build and check
     python tools/build_zip.py --urls          # additionally fetch repository/tracker/homepage
+    python tools/build_zip.py --dirty         # test build with uncommitted changes
 """
 import os
 import re
@@ -53,6 +55,26 @@ def tracked_files():
     files = [f for f in out.split('\0') if f]
     return sorted(f for f in files
                   if not f.startswith(EXCLUDE_PREFIXES) and f not in EXCLUDE_FILES)
+
+
+def worktree_problems():
+    """Plugin files whose content differs from git: modified, deleted or new
+    (untracked, not ignored). Returns a list of (status, path)."""
+    out = subprocess.run(['git', 'status', '--porcelain', '-z', '--untracked-files=all'],  # nosec B603 B607
+                         cwd=PLUGIN_DIR, check=True, stdout=subprocess.PIPE).stdout.decode('utf-8')
+    problems = []
+    for item in out.split('\0'):
+        if len(item) < 4:
+            continue
+        status, path = item[:2], item[3:]
+        if path.startswith(EXCLUDE_PREFIXES) or path in EXCLUDE_FILES:
+            continue
+        problems.append((status.strip() or '?', path))
+    return problems
+
+
+def _version_key(text):
+    return tuple(int(p) if p.isdigit() else 0 for p in re.split(r'[.\-]', text))
 
 
 def read_metadata():
@@ -139,6 +161,8 @@ def check_urls(meta, errors):
 def main():
     ap = argparse.ArgumentParser(description='Plugin-Zip bauen und prüfen')
     ap.add_argument('--urls', action='store_true', help='repository/tracker/homepage abrufen')
+    ap.add_argument('--dirty', action='store_true',
+                    help='Testpaket trotz nicht eingecheckter Änderungen bauen')
     args = ap.parse_args()
 
     meta = read_metadata()
@@ -148,6 +172,11 @@ def main():
     untracked_needed = [f for f in ('LICENSE',) if f not in files]
     for f in untracked_needed:
         errors.append(f'{f} ist nicht in git eingecheckt')
+    for status, path in worktree_problems():
+        text = (f'{path} weicht vom eingecheckten Stand ab ({status}) — Paket und Repository '
+                'müssen übereinstimmen: erst committen')
+        (warnings if args.dirty else errors).append(text)
+    files = [f for f in files if os.path.exists(os.path.join(PLUGIN_DIR, f))]
     names = [f'{PACKAGE}/{f}' for f in files]
     check_names(names, errors, warnings)
     if args.urls:
@@ -155,13 +184,15 @@ def main():
 
     out_dir = os.path.join(PLUGIN_DIR, 'dist')
     os.makedirs(out_dir, exist_ok=True)
-    out = os.path.join(out_dir, f'{PACKAGE}_{meta.get("version", "0")}.zip')
+    version = meta.get('version', '0')
+    out = os.path.join(out_dir, f'{PACKAGE}_{version}.zip')
+    tmp = out + '.tmp'                 # an existing good package stays until the new one passed
     if not errors:
-        with zipfile.ZipFile(out, 'w', zipfile.ZIP_DEFLATED, compresslevel=9) as z:
+        with zipfile.ZipFile(tmp, 'w', zipfile.ZIP_DEFLATED, compresslevel=9) as z:
             for f in files:
                 z.write(os.path.join(PLUGIN_DIR, f), f'{PACKAGE}/{f}')
-        size = os.path.getsize(out)
-        with zipfile.ZipFile(out) as z:
+        size = os.path.getsize(tmp)
+        with zipfile.ZipFile(tmp) as z:
             if z.testzip() is not None:
                 errors.append('Zip fehlerhaft')
         if size > MAX_BYTES:
@@ -171,12 +202,14 @@ def main():
     if errors:
         for e in errors:
             print('FEHLER:', e)
-        if os.path.exists(out):
-            os.remove(out)
+        if os.path.exists(tmp):
+            os.remove(tmp)
         return 1
-    # Only the current package is kept in dist/ (it is checked in); older ones are removed
+    os.replace(tmp, out)
+    # Packages of OLDER versions are removed (published as GitHub releases)
     for old in os.listdir(out_dir):
-        if old.startswith(f'{PACKAGE}_') and old.endswith('.zip') and old != os.path.basename(out):
+        m = re.fullmatch(re.escape(PACKAGE) + r'_(.+)\.zip', old)
+        if m and _version_key(m.group(1)) < _version_key(version):
             os.remove(os.path.join(out_dir, old))
             print('Altes Paket entfernt:', old)
     print(f'{out}: {len(files)} Dateien, {size / 1e6:.1f} MB — alle Prüfungen bestanden.')

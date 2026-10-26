@@ -22,7 +22,6 @@ import sys
 import html
 import json
 import argparse
-import configparser
 import urllib.parse
 
 PLUGIN_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -93,17 +92,32 @@ def tables(cat):
 
 def changelog(path=METADATA):
     """Changelog entries [(version, text)] from metadata.txt, newest first as written there.
-    Each entry starts with '<version> - '; further lines belong to the previous entry."""
-    cp = configparser.ConfigParser(interpolation=None)
-    cp.read(path, encoding='utf-8')
+    Read from the raw text (configparser would drop the indentation): an entry
+    starts with '<version> - ' at the indentation of the first entry; lines
+    indented deeper continue the previous entry — so a wrapped line that begins
+    with a number ("2 - 3 Minuten") is never taken for a new version."""
+    lines = open(path, encoding='utf-8').read().splitlines()
+    try:
+        start = next(i for i, ln in enumerate(lines) if re.match(r'changelog\s*=', ln))
+    except StopIteration:
+        return []
+    first = lines[start].split('=', 1)[1].strip()
+    block = ([first] if first else []) + [ln for ln in
+                                          __import__('itertools').takewhile(
+                                              lambda ln: not ln.strip() or ln[:1] in ' \t',
+                                              lines[start + 1:])]
+    indents = [len(ln) - len(ln.lstrip()) for ln in block if ln.strip()]
+    base = min(indents) if indents else 0
     entries = []
-    for line in cp.get('general', 'changelog', fallback='').splitlines():
-        line = line.strip()
-        m = re.match(r'(\d[\w.]*)\s+-\s+(.*)', line)
-        if m:
+    for ln in block:
+        if not ln.strip():
+            continue
+        indent = len(ln) - len(ln.lstrip())
+        m = re.match(r'(\d[\w.]*)\s+-\s+(.*)', ln.strip())
+        if m and indent <= base:
             entries.append([m.group(1), m.group(2)])
-        elif line and entries:
-            entries[-1][1] += ' ' + line
+        elif entries:
+            entries[-1][1] += ' ' + ln.strip()
     return [tuple(e) for e in entries]
 
 

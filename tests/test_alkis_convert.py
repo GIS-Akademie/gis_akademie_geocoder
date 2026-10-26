@@ -153,3 +153,42 @@ def test_index_geojson_urls_encodes_umlauts():
     urls = sd.index_geojson_urls({'url': 'https://x/i', 'url_feld': 'zip'},
                                  FakeHttp({'https://x/i': idx}))
     assert urls == ['https://x/lkr_03158_Wolfenb%C3%BCttel_kon.gpkg.zip']
+
+
+@needs_gdal
+@pytest.mark.parametrize('target, zone', [(25832, '32'), (25833, '33')])
+def test_alkis_other_crs_keeps_gemeinde_and_zone(tmp_path, target, zone):
+    """Data in EPSG:25833: the municipality is looked up in the CRS of the
+    parcels, the zone column follows the target EPSG."""
+    from osgeo import ogr, osr
+    srs = osr.SpatialReference()
+    srs.ImportFromEPSG(25833)
+    path = str(tmp_path / 'bb.gpkg')
+    ds = ogr.GetDriverByName('GPKG').CreateDataSource(path)
+    fl = ds.CreateLayer('flurstuecke', srs, ogr.wkbPolygon)
+    fl.CreateField(ogr.FieldDefn('gem__bez', ogr.OFTString))
+    for name, x0, x1 in (('Westdorf, Stadt', 400000, 401100), ('Ostdorf', 401100, 402000)):
+        f = ogr.Feature(fl.GetLayerDefn())
+        f.SetField('gem__bez', name)
+        f.SetGeometry(_square(ogr, x0, 5800000, x1, 5801000))
+        fl.CreateFeature(f)
+    gb = ds.CreateLayer('gebaeude', srs, ogr.wkbPolygon)
+    for fld in ('bez', 'hnr'):
+        gb.CreateField(ogr.FieldDefn(fld, ogr.OFTString))
+    for bez, hnr, x in (('Hauptstraße', '1', 400100), ('Feldweg', '7', 401800)):
+        f = ogr.Feature(gb.GetLayerDefn())
+        f.SetField('bez', bez)
+        f.SetField('hnr', hnr)
+        f.SetGeometry(_square(ogr, x - 5, 5800500, x + 5, 5800510))
+        gb.CreateFeature(f)
+    ds = None
+    out = tmp_path / 'hk.txt'
+    with open(out, 'w', encoding='utf-8', newline='') as fh:
+        st = ac.alkis_to_rows(path, fh, 'Brandenburg', 'Testkreis', cfg={'epsg': target})
+    rows = sorted((line.split(';') for line in out.read_text(encoding='utf-8').splitlines()),
+                  key=lambda r: r[14])
+    assert st['ohne_gemeinde'] == 0
+    assert [(r[14], r[10], r[17]) for r in rows] == [('Feldweg', 'Ostdorf', zone),
+                                                     ('Hauptstraße', 'Westdorf', zone)]
+    x = float(rows[1][18])
+    assert (750000 < x < 850000) if target == 25832 else (400000 < x < 400200)

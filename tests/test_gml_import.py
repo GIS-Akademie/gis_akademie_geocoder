@@ -130,3 +130,17 @@ def test_gml_import_hamburg_wfs_structure(db, tmp_path):
                        "WHERE bundesland='Hamburg'").fetchone()
     conn.close()
     assert tuple(row) == ('Hamburg', 'Lohbrügge,OT 0601 (Lohbrügge)', '21031', 'Lohbrügger Markt', '1', 25832)
+
+
+def test_pass1_skips_pages_without_name_features(tmp_path):
+    """B44: address pages (only xlink references to names) are not parsed in pass 1."""
+    addr = tmp_path / 'ad_Address_0000.gml'
+    addr.write_text('<wfs:FeatureCollection><wfs:member><ad:Address gml:id="A1">'
+                    '<ad:component xlink:href="#ThoroughfareName_1"/>'
+                    '<ad:component xlink:href="#AdminUnitName_2"/></ad:Address></wfs:member>'
+                    '</wfs:FeatureCollection>', encoding='utf-8')
+    names = tmp_path / 'ad_ThoroughfareName_0000.gml'
+    names.write_text('<wfs:FeatureCollection><wfs:member><ad:ThoroughfareName gml:id="T1">'
+                     '</ad:ThoroughfareName></wfs:member></wfs:FeatureCollection>', encoding='utf-8')
+    assert not gml.has_name_features(str(addr))
+    assert gml.has_name_features(str(names))

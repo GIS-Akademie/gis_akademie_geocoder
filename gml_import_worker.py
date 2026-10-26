@@ -67,6 +67,27 @@ def ref_id(href):
     return href.rstrip('/').rsplit('/', 1)[-1]
 
 
+# Start tag of a name feature (not an xlink reference to one)
+_NAME_FEATURE_RE = re.compile(
+    rb'<(?:[\w.-]+:)?(?:ThoroughfareName|AdminUnitName|PostalDescriptor)[\s>/]')
+
+
+def has_name_features(path, chunk=1 << 22):
+    """Does the file contain street names, administrative units or postal
+    descriptors? Fast byte scan without XML parsing — the address pages of a
+    WFS download contain none of them and are skipped in pass 1 (they make up
+    almost all of the 1–2 GB)."""
+    tail = b''
+    with open(path, 'rb') as f:
+        while True:
+            block = f.read(chunk)
+            if not block:
+                return False
+            if _NAME_FEATURE_RE.search(tail + block):
+                return True
+            tail = block[-80:]
+
+
 def _is_member(tag):
     return tag in _MEMBER_TAGS
 
@@ -197,12 +218,12 @@ class GmlImportWorker(QObject):
             self.detail.emit(traceback.format_exc())
             self.finished.emit(False, f'Import fehlgeschlagen: {e}. {KEEP_MSG}')
 
-    def _iter_members(self):
+    def _iter_members(self, paths=None):
         """Yields all feature containers (gml:featureMember /
-        wfs:member) of all input files in turn; the caller calls elem.clear().
-        An XML error raises _GmlBroken (the whole import is aborted — partial
-        data would replace the complete existing data)."""
-        for path in self.filepaths:
+        wfs:member) of the input files (or of 'paths') in turn; the caller
+        calls elem.clear(). An XML error raises _GmlBroken (the whole import is
+        aborted — partial data would replace the complete existing data)."""
+        for path in (self.filepaths if paths is None else paths):
             try:
                 for event, elem in ET.iterparse(path, events=('end',)):
                     if _is_member(elem.tag):
@@ -296,7 +317,13 @@ class GmlImportWorker(QObject):
         tag_tf, tag_au = _tag('ad', 'ThoroughfareName'), _tag('ad', 'AdminUnitName')
         tag_pd, tag_pc = _tag('ad', 'PostalDescriptor'), _tag('ad', 'postCode')
 
-        for elem in self._iter_members():
+        # Pass 2 parses every file anyway (and reports XML errors there); pass 1
+        # only needs the files with name features.
+        paths = [p for p in self.filepaths if has_name_features(p)]
+        if len(paths) < len(self.filepaths):
+            self.detail.emit(f'Durchgang 1: {len(paths)} von {len(self.filepaths)} Dateien '
+                             'mit Namen, Verwaltungseinheiten oder Postleitzahlen')
+        for elem in self._iter_members(paths):
             if self._cancelled:
                 return {}, {}
 

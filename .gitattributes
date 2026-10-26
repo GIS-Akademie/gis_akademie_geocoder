@@ -1,0 +1,11 @@
+# Einheitliche Zeilenenden: Quelltexte mit LF im Repo und im Arbeitsverzeichnis
+* text=auto
+*.py   text eol=lf
+*.ui   text eol=lf
+*.html text eol=lf
+*.md   text eol=lf
+*.txt  text eol=lf
+*.png  binary
+*.db   binary
+# Mitgelieferte PLZ-Gebiete: große einzeilige Datei, unverändert lassen
+data/*.geojson -text

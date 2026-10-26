@@ -1,0 +1,19 @@
+{
+  "name": "PLZ-Gebiete Deutschland",
+  "quelle": "OpenStreetMap – Grenzen der Postleitzahlgebiete",
+  "quelle_url": "https://www.openstreetmap.org/",
+  "auszug": "Deutschland-Extrakt von Geofabrik",
+  "auszug_url": "https://download.geofabrik.de/europe/germany.html",
+  "rohdaten": "OpenStreetMap (direkt)",
+  "attribution": "© OpenStreetMap-Mitwirkende",
+  "lizenz": "ODbL 1.0",
+  "lizenz_url": "https://opendatacommons.org/licenses/odbl/1-0/",
+  "stand": "2026-10-24",
+  "abgerufen": "2026-10-25",
+  "anzahl": 8172,
+  "crs": "EPSG:25832",
+  "generalisierung_m": 5.0,
+  "feld": "plz",
+  "koordinaten_m": 1,
+  "pruefsumme_crc32": 803382134
+}

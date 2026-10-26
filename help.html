@@ -1,0 +1,961 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<title>GIS-Akademie Geocoder – Dokumentation</title>
+<style>
+  body { font-family: Segoe UI, Arial, sans-serif; font-size: 13px; margin: 0; padding: 0; background: #f5f5f5; color: #222; }
+  .sidebar { position: fixed; top: 0; left: 0; bottom: 0; width: 210px; background: #2c3e50; padding: 20px 0; overflow-y: auto; }
+  .sidebar-logo { color: #fff; font-size: 13px; font-weight: 700; padding: 0 16px 4px; margin: 0; letter-spacing: 0.3px; }
+  .sidebar-sub  { color: #7f8c8d; font-size: 10px; padding: 0 16px 12px; border-bottom: 1px solid #3d5166; display: block; }
+  .sidebar a { display: block; color: #bdc3cb; text-decoration: none; padding: 7px 16px; font-size: 12px; border-left: 3px solid transparent; }
+  .sidebar a:hover, .sidebar a.active { color: #fff; background: #3d5166; border-left-color: #e74c3c; }
+  .sidebar .section-label { color: #7f8c8d; font-size: 10px; text-transform: uppercase; letter-spacing: 1px; padding: 12px 16px 3px; }
+  .content { margin-left: 210px; padding: 28px 40px; max-width: 820px; }
+  h1 { font-size: 22px; color: #2c3e50; border-bottom: 2px solid #e74c3c; padding-bottom: 8px; margin-top: 0; }
+  h1 span { font-size: 13px; font-weight: normal; color: #7f8c8d; margin-left: 8px; }
+  h2 { font-size: 15px; color: #2c3e50; margin-top: 36px; border-left: 4px solid #e74c3c; padding-left: 10px; }
+  h3 { font-size: 13px; color: #555; margin-top: 16px; margin-bottom: 4px; }
+  p { line-height: 1.6; margin: 6px 0 10px; }
+  ul, ol { line-height: 1.6; margin: 6px 0 10px; padding-left: 22px; }
+  li { margin-bottom: 3px; }
+  table { border-collapse: collapse; width: 100%; margin: 10px 0 18px; font-size: 12px; }
+  th { background: #2c3e50; color: #fff; text-align: left; padding: 7px 10px; }
+  td { padding: 6px 10px; border-bottom: 1px solid #ddd; vertical-align: top; }
+  td.zahl { text-align: right; white-space: nowrap; }
+  tr:nth-child(even) td { background: #f9f9f9; }
+  tr.summe td { font-weight: bold; border-top: 2px solid #2c3e50; background: #fff; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: bold; color: #fff; }
+  .l5 { background: #27ae60; } .l4 { background: #2ecc71; color: #1a6e3c; }
+  .l3 { background: #f39c12; } .l2 { background: #e67e22; }
+  .l1 { background: #e74c3c; } .l0 { background: #95a5a6; }
+  .src-local { background: #1a6e3c; } .src-nom { background: #2980b9; }
+  .tip  { background: #eaf4fb; border-left: 4px solid #3498db; padding: 10px 14px; margin: 10px 0; font-size: 12px; border-radius: 0 4px 4px 0; }
+  .warn { background: #fef9e7; border-left: 4px solid #f39c12; padding: 10px 14px; margin: 10px 0; font-size: 12px; border-radius: 0 4px 4px 0; }
+  .info { background: #f0f4ff; border-left: 4px solid #6c7ae0; padding: 10px 14px; margin: 10px 0; font-size: 12px; border-radius: 0 4px 4px 0; }
+  code { background: #ecf0f1; padding: 1px 5px; border-radius: 3px; font-family: Consolas, monospace; font-size: 11px; }
+  .section { margin-bottom: 44px; }
+  a { color: #2980b9; }
+</style>
+</head>
+<body>
+
+<div class="sidebar">
+  <div class="sidebar-logo">GIS-Akademie Geocoder</div>
+  <span class="sidebar-sub">gis-akademie.de</span>
+  <div class="section-label">Einstieg</div>
+  <a href="#ueberblick">Überblick</a>
+  <a href="#schnellstart">Schnellstart in 3 Schritten</a>
+  <div class="section-label">Datenbank einrichten</div>
+  <a href="#einrichten">Erstes Einrichten</a>
+  <a href="#aufwand">Aufwand je Bundesland</a>
+  <a href="#geodatenabo">Alternative: Geodatenabo Plus</a>
+  <div class="section-label">Geocodierung</div>
+  <a href="#eingabe">Eingabedatei</a>
+  <a href="#spalten">Spaltenzuordnung</a>
+  <a href="#ausgabe">Ausgabe</a>
+  <a href="#optionen">Optionen</a>
+  <a href="#starten">Starten / Abbrechen</a>
+  <a href="#routing">Lokal oder Nominatim</a>
+  <div class="section-label">Datenbank &amp; Quellen</div>
+  <a href="#reiter_db">Der Reiter im Überblick</a>
+  <a href="#detailseite">Detailseite eines Landes</a>
+  <a href="#sperre">Sperre nach Abruf</a>
+  <a href="#quellenliste">Quellenliste online</a>
+  <a href="#ausweich">Ausweichquellen und Schutz</a>
+  <a href="#bundeslaender">Die Quellen der Länder</a>
+  <a href="#plz">Postleitzahlen</a>
+  <a href="#osm">OpenStreetMap (Bayern)</a>
+  <div class="section-label">Ergebnis</div>
+  <a href="#felder">Ausgabefelder</a>
+  <a href="#accuracy">Genauigkeitsstufen</a>
+  <a href="#local_score">Fuzzy-Score (lokal)</a>
+  <a href="#nichtgefunden">Nicht gefunden</a>
+  <div class="section-label">Anhang</div>
+  <a href="#formate">Datenformate (technisch)</a>
+  <a href="#faq">Fehlerbehebung &amp; Fragen</a>
+  <a href="#policy">Lizenzen und Quellenvermerke</a>
+</div>
+
+<div class="content">
+
+  <h1>GIS-Akademie Geocoder <span>Dokumentation v1.0</span></h1>
+
+  <!-- ══ ÜBERBLICK ══ -->
+  <div class="section" id="ueberblick">
+    <h2>Überblick</h2>
+    <p>Dieses QGIS-Plugin ordnet Adressen aus Tabellendateien (CSV, Excel, OpenDocument, Tab-getrennt) Koordinaten zu
+    – man spricht von <strong>Geocodierung</strong> – und speichert das Ergebnis als Punkt-Layer in einem
+    GeoPackage.</p>
+    <p>Grundlage ist eine <strong>lokale Datenbank amtlicher Hauskoordinaten</strong> aller
+    16 Bundesländer. Das Plugin lädt diese Daten selbst aus den freien Angeboten (Open Data) der Länder;
+    Bayern stammt aus OpenStreetMap, weil amtliche Adressen dort kostenpflichtig sind. Adressen ohne
+    lokalen Treffer können wahlweise beim Online-Dienst <strong>Nominatim</strong> (OpenStreetMap)
+    nachgeschlagen werden.</p>
+    <p>Auf Wunsch arbeitet das Plugin vollständig <strong>DSGVO-konform</strong>: Mit der Option
+    <em>„DSGVO-konformes Geocodieren“</em> wird nur die lokale Datenbank genutzt — keine Adresse verlässt
+    den Rechner (siehe <a href="#optionen">Optionen</a>).</p>
+    <p>Diese Hilfe öffnen Sie im Plugin jederzeit über <em>Hilfe</em>.
+    Entwickelt von der <a href="https://gis-akademie.de" target="_blank">GIS-Akademie</a>.</p>
+  </div>
+
+  <!-- ══ SCHNELLSTART ══ -->
+  <div class="section" id="schnellstart">
+    <h2>Schnellstart in 3 Schritten</h2>
+    <ol>
+      <li><strong>Datenbank einrichten (einmalig).</strong> Reiter „Datenbank &amp; Quellen“ öffnen und
+        <em>Alle eingetragenen Quellen aktualisieren</em> klicken. Das Plugin lädt alle 16 Bundesländer
+        nacheinander. Beim ersten Mal dauert das rund 2,5–3 Stunden (siehe
+        <a href="#aufwand">Aufwand je Bundesland</a>) — am besten über Nacht. Wer die Einrichtung
+        sparen möchte, kann eine fertige Datenbank einbinden (siehe <a href="#abo">Geodatenabo Plus</a>).</li>
+      <li><strong>Datei geocodieren.</strong> Im Reiter „Geocodierung“ die Adressdatei wählen, die
+        Spaltenzuordnung prüfen, Ziel-GeoPackage und Layer-Name angeben und
+        <em>Geocodierung starten</em> klicken.</li>
+      <li><strong>Ergebnis prüfen.</strong> Der fertige Layer wird in QGIS geladen. Die Felder
+        <code>accuracy_level</code> (Genauigkeit) und <code>local_score</code> (Übereinstimmung) zeigen,
+        wie gut jeder Treffer ist; nicht gefundene Adressen lassen sich gezielt nacharbeiten
+        (siehe <a href="#felder">Ergebnis</a>).</li>
+    </ol>
+  </div>
+
+  <!-- ══ EINRICHTEN ══ -->
+  <div class="section" id="einrichten">
+    <h2>Datenbank einrichten</h2>
+    <p>Die lokale Suche braucht eine <strong>Geocodierungsdatenbank</strong>: eine einzelne Datei mit den
+    Adressen und Koordinaten aller geladenen Bundesländer. Sie wird einmal eingerichtet und danach nur noch
+    aktualisiert. Ohne Datenbank kann das Plugin nur über Nominatim (Internet) geocodieren; im
+    DSGVO-Modus findet es dann nichts.</p>
+
+    <h3>Schritt 1: Speicherort festlegen</h3>
+    <p>Im Reiter „Datenbank &amp; Quellen“ zeigt der Rahmen <em>Geocodierungsdatenbank</em> den Pfad der
+    Datenbankdatei. Standard ist ein Ordner im QGIS-Profil
+    (<code>&lt;QGIS-Profil&gt;/gis_akademie_geocoder/geocoder.db</code>); dort übersteht die Datenbank
+    Plugin-Updates. Meist können Sie diesen Pfad unverändert lassen.</p>
+    <p>Soll die Datenbank woanders liegen (z.&nbsp;B. auf einem Laufwerk mit mehr Platz), tragen Sie den
+    Pfad unter <em>Pfad zur Datenbankdatei</em> ein und klicken <em>Pfad speichern und Datenbank
+    verwenden</em>. Gibt es die Datei noch nicht, meldet das Plugin „Pfad gespeichert. Datei wird beim
+    ersten Import angelegt.“ Eine Datenbank am früheren Ort im Plugin-Ordner wird automatisch
+    weiterverwendet.</p>
+
+    <h3>Schritt 2: Daten laden</h3>
+    <ul>
+      <li><strong>Alle Länder auf einmal:</strong> <em>Alle eingetragenen Quellen aktualisieren</em> lädt
+        alle 16 Bundesländer nacheinander — Herunterladen, Umwandeln, Importieren und Ergänzen fehlender
+        Postleitzahlen geschehen automatisch. Fortschritt und Protokoll stehen im Rahmen
+        <em>Fortschritt</em>; am Ende nennt eine Zusammenfassung je Land <em>aktualisiert</em>,
+        <em>unverändert</em>, <em>übersprungen</em> oder <em>Fehler</em>.</li>
+      <li><strong>Nur einzelne Länder:</strong> In der Tabelle <em>Quellen je Bundesland</em> auf den Stift
+        am Zeilenende klicken (oder die Zeile doppelklicken). Auf der Detailseite lädt
+        <em>Jetzt aktualisieren</em> nur dieses Land.</li>
+    </ul>
+    <div class="tip"><strong>Nur benötigte Länder laden spart Zeit.</strong> Wenn Ihre Adressen nur aus
+    wenigen Bundesländern stammen, reichen diese. Adressen aus Ländern ohne Daten in der Datenbank gehen
+    sonst an Nominatim — oder bleiben im DSGVO-Modus „nicht gefunden“.</div>
+
+    <h3>Empfehlungen für den ersten Lauf</h3>
+    <ul>
+      <li><strong>Freier Speicher:</strong> Die fertige Datenbank für alle Länder belegt rund 5–6&nbsp;GB;
+        während des Imports werden zusätzlich bis ca. 2–3&nbsp;GB gebraucht.</li>
+      <li><strong>Stabile Internetverbindung:</strong> Insgesamt werden rund 11&nbsp;GB heruntergeladen.</li>
+      <li><strong>Zeitpunkt:</strong> Am besten über Nacht oder außerhalb der Arbeitszeit starten.
+        QGIS muss währenddessen geöffnet bleiben; den Rechner nicht herunterfahren.</li>
+      <li><strong>Abbrechen ist jederzeit möglich</strong> (Knopf <em>Abbrechen</em> im Rahmen
+        <em>Fortschritt</em>). Bereits importierte Länder bleiben erhalten. Ein späterer Klick auf
+        <em>Alle eingetragenen Quellen aktualisieren</em> lädt fertige Länder nicht erneut, weil sie keine
+        neuen Daten haben oder gesperrt sind (siehe <a href="#sperre">Sperre nach Abruf</a>).</li>
+      <li><strong>Ein Fehler bei einem Land bricht die anderen nicht ab.</strong> Ist ein Server gerade
+        nicht erreichbar, laden Sie dieses Land später erneut.</li>
+    </ul>
+
+    <h3>Nach dem ersten Einrichten</h3>
+    <ul>
+      <li>Am Ende jedes Abrufs aktualisiert das Plugin sein Verzeichnis der Orte und Ortsteile (bei der
+    bundesweiten Datenbank zwei bis drei Minuten); danach ist die Datenbank sofort einsatzbereit.</li>
+      <li><strong>Aktualisieren:</strong> Ein erneuter Klick auf <em>Alle eingetragenen Quellen
+        aktualisieren</em> lädt nur, was seit dem letzten Abruf neu ist — meist dauert das nur Minuten. Das
+        Plugin lädt nie von selbst; wann Sie aktualisieren, bestimmen Sie.</li>
+    </ul>
+  </div>
+
+  <!-- ══ AUFWAND ══ -->
+  <div class="section" id="aufwand">
+    <h2>Aufwand je Bundesland</h2>
+    <p>Messwerte vom 26.10.2026 auf einem Rechner mit schneller Internetleitung. Die Dauer umfasst
+    Download, Umwandlung und Import einschließlich PLZ-Ergänzung und ist als ungefährer Wert zu
+    verstehen.</p>
+    <table>
+      <tr><th>Bundesland</th><th>Daten (Download)</th><th>Dauer ca.</th><th>Adressen</th><th>PLZ</th></tr>
+      <tr><td>Baden-Württemberg</td><td>73&nbsp;MB</td><td>3–5&nbsp;min</td><td class="zahl">3,09&nbsp;Mio.</td><td>ergänzt</td></tr>
+      <tr><td>Bayern</td><td>860&nbsp;MB (OpenStreetMap)</td><td>8–10&nbsp;min</td><td class="zahl">2,51&nbsp;Mio.</td><td>aus OSM, Rest ergänzt</td></tr>
+      <tr><td>Berlin</td><td>10&nbsp;MB</td><td>&lt; 1&nbsp;min</td><td class="zahl">0,39&nbsp;Mio.</td><td>enthalten</td></tr>
+      <tr><td>Brandenburg</td><td>ca. 1,7&nbsp;GB (WFS, Kacheln)</td><td>ca. 60 min</td><td class="zahl">0,87&nbsp;Mio.</td><td>ergänzt</td></tr>
+      <tr><td>Bremen</td><td>11&nbsp;MB</td><td>ca. 1&nbsp;min</td><td class="zahl">0,18&nbsp;Mio.</td><td>enthalten</td></tr>
+      <tr><td>Hamburg</td><td>ca. 1,6&nbsp;GB (WFS)</td><td>10–15&nbsp;min</td><td class="zahl">0,30&nbsp;Mio.</td><td>enthalten</td></tr>
+      <tr><td>Hessen</td><td>29&nbsp;MB</td><td>1–2&nbsp;min</td><td class="zahl">1,63&nbsp;Mio.</td><td>ergänzt</td></tr>
+      <tr><td>Mecklenburg-Vorpommern</td><td>ca. 2,3&nbsp;GB (WFS, Kacheln)</td><td>ca. 25&nbsp;min</td><td class="zahl">0,52&nbsp;Mio.</td><td>ergänzt</td></tr>
+      <tr><td>Niedersachsen</td><td>4,4&nbsp;GB (45 Kreisdateien)</td><td>ca. 20&nbsp;min</td><td class="zahl">2,56&nbsp;Mio.</td><td>ergänzt</td></tr>
+      <tr><td>Nordrhein-Westfalen</td><td>97&nbsp;MB</td><td>4–6&nbsp;min</td><td class="zahl">4,51&nbsp;Mio.</td><td>ergänzt</td></tr>
+      <tr><td>Rheinland-Pfalz</td><td>27&nbsp;MB</td><td>ca. 2&nbsp;min</td><td class="zahl">1,41&nbsp;Mio.</td><td>ergänzt</td></tr>
+      <tr><td>Saarland</td><td>ca. 160&nbsp;MB (OGC API, Seiten)</td><td>ca. 10&nbsp;min</td><td class="zahl">0,33&nbsp;Mio.</td><td>enthalten</td></tr>
+      <tr><td>Sachsen</td><td>22&nbsp;MB</td><td>ca. 1–2&nbsp;min</td><td class="zahl">0,99&nbsp;Mio.</td><td>enthalten</td></tr>
+      <tr><td>Sachsen-Anhalt</td><td>19&nbsp;MB</td><td>ca. 1–2&nbsp;min</td><td class="zahl">0,66&nbsp;Mio.</td><td>ergänzt</td></tr>
+      <tr><td>Schleswig-Holstein</td><td>16&nbsp;MB</td><td>ca. 1&nbsp;min</td><td class="zahl">0,95&nbsp;Mio.</td><td>enthalten</td></tr>
+      <tr><td>Thüringen</td><td>11&nbsp;MB (Ersatz: 26&nbsp;MB INSPIRE)</td><td>ca. 1–3&nbsp;min</td><td class="zahl">0,62&nbsp;Mio.</td><td>ergänzt</td></tr>
+      <tr class="summe"><td>Alle 16 Länder</td><td>rund 11&nbsp;GB</td><td>rund 2,5–3&nbsp;h</td><td class="zahl">rund 21,5&nbsp;Mio.</td><td></td></tr>
+    </table>
+    <p><strong>PLZ:</strong> „enthalten“ = die Quelle liefert Postleitzahlen mit; „ergänzt“ = das Plugin
+    ergänzt sie automatisch aus den mitgelieferten PLZ-Gebieten (siehe <a href="#plz">Postleitzahlen</a>).
+    <strong>WFS</strong> (Web Feature Service) ist ein Internetdienst, der Geodaten in Teilen ausliefert;
+    bei „Kacheln“ lädt das Plugin das Land Stück für Stück in räumlichen Ausschnitten.</p>
+    <ul>
+      <li><strong>Download:</strong> rund 11&nbsp;GB für alle Länder. Die Download-Dateien sind nur
+        vorübergehend nötig und werden nach dem erfolgreichen Import gelöscht.</li>
+      <li><strong>Fertige Datenbank:</strong> rund 5–6&nbsp;GB; während des Imports zusätzlich bis
+        ca. 2–3&nbsp;GB.</li>
+      <li><strong>Danach:</strong> Aktualisieren lädt nur, was neu ist — meist in wenigen Minuten.</li>
+    </ul>
+    <div class="warn">Mit langsamerer Leitung oder einem langsameren Rechner dauert es entsprechend länger.
+    Ist der Server eines Landes vorübergehend nicht erreichbar (z.&nbsp;B. wegen Wartung), das Land einfach
+    später erneut laden; der übrige Bestand bleibt davon unberührt.</div>
+  </div>
+
+  <!-- ══ GEODATENABO ══ -->
+  <div class="section" id="geodatenabo">
+    <h2>Alternative ohne Einrichtung: Geodatenabo Plus</h2>
+    <div class="info" id="abo">
+      <p><strong>Optionales Angebot der GIS-Akademie.</strong> Das Plugin funktioniert ohne Abo
+      vollständig — alle Daten lassen sich wie oben beschrieben selbst laden und aktualisieren.</p>
+      <p>Wer die Datenbank nicht selbst einrichten und pflegen möchte, kann sie mit dem
+      <strong>Geodatenabo Plus</strong> fertig beziehen: eine Geocodierungsdatenbank für alle
+      16 Bundesländer, die <strong>monatlich aktualisiert</strong> wird.</p>
+      <p><strong>Einbinden:</strong> Datenbankdatei speichern, im Reiter „Datenbank &amp; Quellen“ unter
+      <em>Pfad zur Datenbankdatei</em> eintragen und <em>Pfad speichern und Datenbank verwenden</em>
+      klicken. Ein eigener Download oder Import ist nicht nötig.</p>
+      <p>Informationen: <a href="https://www.gis-akademie.de/gis/geodatenabo.html" target="_blank">GIS-Akademie – Geodatenabo Plus</a></p>
+    </div>
+  </div>
+
+  <!-- ══ EINGABE ══ -->
+  <div class="section" id="eingabe">
+    <h2>Geocodierung: Eingabedatei</h2>
+    <p>Alle Schritte des Geocodierens finden im Reiter „Geocodierung“ statt. Im Rahmen
+    <em>1 · Eingabedatei</em> wählen Sie die Datei über <em>Durchsuchen …</em> oder tippen den Pfad ein.
+    Ein roter Rahmen zeigt einen ungültigen Pfad an.</p>
+    <table>
+      <tr><th>Format</th><th>Endung</th><th>Hinweis</th></tr>
+      <tr><td>CSV</td><td><code>.csv</code></td><td>Trennzeichen (Komma, Semikolon, Tab, senkrechter Strich) und Zeichenkodierung (UTF-8, CP1252, Latin-1) werden automatisch erkannt.</td></tr>
+      <tr><td>Tab-getrennt</td><td><code>.txt .tsv .tab</code></td><td>Tabulator als Trennzeichen.</td></tr>
+      <tr><td>Excel</td><td><code>.xlsx .xls</code></td><td>Bei mehreren Tabellenblättern erscheint eine Auswahl. <code>.xlsx</code> wird mit dem Python-Paket <code>openpyxl</code> gelesen, fehlt es, mit GDAL (Teil von QGIS). Das alte Format <code>.xls</code> benötigt das Paket <code>xlrd</code>.</td></tr>
+      <tr><td>OpenDocument-Tabelle</td><td><code>.ods</code></td><td>Offenes Format, z.&nbsp;B. aus LibreOffice Calc. Wird mit GDAL gelesen (Teil von QGIS, keine Zusatzpakete); alle Zellen werden als Text übernommen, führende Nullen der PLZ bleiben erhalten. Bei mehreren Tabellenblättern erscheint eine Auswahl.</td></tr>
+    </table>
+    <p>Nach dem Laden zeigt <em>Erkannter Dateityp</em> Format und Tabellenblatt; die <em>Vorschau</em>
+    zeigt die ersten Felder der ersten Zeile.</p>
+  </div>
+
+  <!-- ══ SPALTENZUORDNUNG ══ -->
+  <div class="section" id="spalten">
+    <h2>Geocodierung: Spaltenzuordnung</h2>
+    <p>Im Rahmen <em>2 · Spaltenzuordnung</em> legen Sie fest, welche Spalte welche Adressangabe enthält.
+    Häufige Spaltennamen werden automatisch erkannt.</p>
+    <h3>Unterreiter „Mehrere Spalten“</h3>
+    <table>
+      <tr><th>Feld</th><th>Pflicht</th><th>Beschreibung</th></tr>
+      <tr><td>Straße (+ Hausnummer)</td><td>*</td><td>Straßenname, gern mit Hausnummer in derselben Spalte („Lindenstraße 12“). Die Hausnummer wird automatisch abgetrennt; bei Bereichen wie „12-14“ oder „12/14“ zählt die erste Nummer.</td></tr>
+      <tr><td>Hausnummer (eigene Spalte)</td><td>–</td><td>Optional. Empfohlen bei Straßennamen mit Zahl („Straße 10“, „An der B 5“), damit die Zahl im Namen nicht als Hausnummer gelesen wird.</td></tr>
+      <tr><td>Postleitzahl</td><td>–</td><td>Optional, aber empfohlen: Sie verbessert die Trefferquote und dient zur Erkennung des Bundeslands.</td></tr>
+      <tr><td>Stadt / Ort</td><td>*</td><td>Gemeinde, Ortsteil oder Bezirk („Blankenese“, „Pankow“, „Berlin-Mitte“). Gleichnamige Orte werden über PLZ bzw. Bundesland unterschieden, sonst gilt der größte.</td></tr>
+      <tr><td>Bundesland</td><td>–</td><td>Optional, z.&nbsp;B. „Nordrhein-Westfalen“ oder „NRW“. Angaben wie „Deutschland“ werden ignoriert.</td></tr>
+    </table>
+    <p>* Mindestens Straße <em>oder</em> Stadt muss zugeordnet sein.</p>
+    <div class="tip">Die besten Ergebnisse liefert die Kombination <strong>Straße + Hausnummer + PLZ +
+    Stadt</strong>.</div>
+    <h3>Unterreiter „Eine Spalte“</h3>
+    <p>Steht die komplette Adresse in einer einzigen Spalte (z.&nbsp;B. <code>Lorettoplatz 7, 81377
+    München</code>), wählen Sie den Unterreiter <em>Eine Spalte</em> und ordnen nur die
+    <em>Adressspalte</em> zu. Straße, Hausnummer, PLZ und Ort werden dann automatisch erkannt — mit oder
+    ohne Komma.</p>
+    <div class="warn">Die automatische Zerlegung kann bei ungewöhnlichem Aufbau (z.&nbsp;B. Ort vor der
+    Straße) danebenliegen. Getrennte Spalten sind dann zuverlässiger.</div>
+  </div>
+
+  <!-- ══ AUSGABE ══ -->
+  <div class="section" id="ausgabe">
+    <h2>Geocodierung: Ausgabe</h2>
+    <p>Im Rahmen <em>3 · Ausgabe</em> geben Sie an, wohin das Ergebnis geschrieben wird.</p>
+    <ul>
+      <li><strong>GeoPackage:</strong> Pfad zur <code>.gpkg</code>-Zieldatei. Existiert die Datei bereits,
+        wird der neue Layer hinzugefügt — bestehende Layer bleiben erhalten.</li>
+      <li><strong>Layer-Name:</strong> nur Buchstaben, Ziffern und <code>_</code>, keine Leerzeichen.
+        Er wird aus dem Namen der Eingabedatei vorgeschlagen; ein roter Rahmen zeigt einen ungültigen
+        Namen an.</li>
+    </ul>
+  </div>
+
+  <!-- ══ OPTIONEN ══ -->
+  <div class="section" id="optionen">
+    <h2>Geocodierung: Optionen</h2>
+    <h3>Layer nach Geocodierung in QGIS laden</h3>
+    <p>Lädt den fertigen Layer automatisch ins aktuelle QGIS-Projekt.</p>
+    <h3>Nicht gefundene Adressen aussortieren und als CSV ablegen</h3>
+    <p>Ohne diese Option stehen nicht gefundene Adressen mit leerer Geometrie im Ergebnis-Layer. Mit der
+    Option enthält der Layer nur Treffer; die übrigen Adressen landen als CSV-Datei
+    <code>&lt;Layer-Name&gt;_nicht_gefunden.csv</code> im Ordner des GeoPackages (Semikolon-getrennt,
+    UTF-8) — mit den ursprünglichen Spalten, der zusammengesetzten Abfrage und einem Hinweis zum Grund.</p>
+    <h3>Punkte mit identischen Koordinaten um 1 m versetzen</h3>
+    <p>Erhalten mehrere Adressen genau dieselben Koordinaten, werden die weiteren Punkte auf einem Kreis
+    mit 1&nbsp;m Radius verteilt (bis zu 8 Positionen). Der erste Treffer bleibt an seiner Stelle. Der
+    Versatz dient nur der Darstellung; die Original-Koordinaten stehen weiter in <code>lat</code> und
+    <code>lon</code>.</p>
+    <h3>DSGVO-konformes Geocodieren (nur lokale Quellen)</h3>
+    <p>Es wird ausschließlich die lokale Datenbank genutzt, <strong>keine Online-Abfrage</strong> —
+    keine Adresse verlässt den Rechner. Adressen ohne lokalen Treffer bleiben „nicht gefunden (nur
+    lokal)“. Geeignet für datenschutzsensible Bereiche wie Verwaltung, Gesundheit oder Soziales.</p>
+    <div class="warn">Ohne lokale Datenbank liefert dieser Modus keine Treffer. Richten Sie zuerst die
+    Datenbank ein (siehe <a href="#einrichten">Datenbank einrichten</a>).</div>
+  </div>
+
+  <!-- ══ STARTEN ══ -->
+  <div class="section" id="starten">
+    <h2>Geocodierung starten / Abbrechen</h2>
+    <p><em>Geocodierung starten</em> arbeitet im Hintergrund — QGIS bleibt bedienbar. Das Protokoll
+    zeigt für jede Adresse die verwendete Quelle und am Ende eine Zusammenfassung. <em>Abbrechen</em>
+    beendet den Lauf.</p>
+    <div class="tip"><strong>Laufzeit:</strong> Lokale Adressen werden sofort verarbeitet. Nominatim
+    braucht ca. 1,1 Sekunden je Adresse — 100 Adressen über Nominatim dauern also rund 2 Minuten.</div>
+  </div>
+
+  <!-- ══ ROUTING ══ -->
+  <div class="section" id="routing">
+    <h2>Lokal oder Nominatim: Welche Quelle wird genutzt?</h2>
+    <p>Der Geocoder entscheidet für jede Adresse selbst:</p>
+    <table>
+      <tr><th>Bedingung</th><th>Quelle</th><th>Eintrag in <code>geocoder_source</code></th></tr>
+      <tr>
+        <td>Lokale Datenbank vorhanden und Bundesland der Adresse erkannt (über PLZ oder Feld Bundesland)</td>
+        <td><span class="badge src-local">Lokal</span></td>
+        <td><code>Lokal (Hessen)</code>, <code>Lokal (Hamburg)</code> …</td>
+      </tr>
+      <tr>
+        <td>Lokal gesucht, aber kein Treffer</td>
+        <td><span class="badge src-nom">Nominatim</span></td>
+        <td><code>Nominatim (Fallback)</code></td>
+      </tr>
+      <tr>
+        <td>Keine lokale Datenbank oder Adresse außerhalb der geladenen Bundesländer</td>
+        <td><span class="badge src-nom">Nominatim</span></td>
+        <td><code>Nominatim</code></td>
+      </tr>
+    </table>
+    <p>Im DSGVO-Modus entfallen beide Nominatim-Zeilen.</p>
+    <h3>Bundesland-Erkennung über die PLZ</h3>
+    <p>Fehlt ein Bundesland-Feld (oder steht dort nur „Deutschland“), erkennt der Geocoder das Bundesland
+    an den ersten beiden Ziffern der PLZ. Bereiche, die mehrere Länder betreffen (z.&nbsp;B. 14xxx Berlin/
+    Brandenburg, 76xxx Baden-Württemberg/Rheinland-Pfalz), werden bewusst nicht zugeordnet; dann
+    entscheiden Ort und PLZ. Bremen wird nur über das Bundesland-Feld bzw. den Ort erkannt, weil 28xxx
+    auch das niedersächsische Umland umfasst. Die vollständige Liste steht im Anhang
+    (<a href="#plz_praefixe">PLZ-Präfixe</a>).</p>
+    <div class="tip">Eine vollständige 5-stellige PLZ ist bundesweit eindeutig. Die lokale Suche findet die
+    Adresse darüber auch dann, wenn der Ort fehlt oder das aus der PLZ geratene Bundesland falsch wäre
+    (z.&nbsp;B. 21244 Buchholz, deren Präfix 21 sonst Hamburg zugeordnet ist).</div>
+    <h3>Nominatim (Online-Dienst)</h3>
+    <p>Nominatim ist der Geocoder von OpenStreetMap. Er wird für Adressen außerhalb der geladenen
+    Bundesländer genutzt und als Ersatz, wenn die lokale Suche nichts findet. Erlaubt ist höchstens
+    1 Anfrage pro Sekunde; das Plugin hält das automatisch ein (siehe
+    <a href="#policy">Nutzungsrichtlinien</a>).</p>
+  </div>
+
+  <!-- ══ REITER DATENBANK & QUELLEN ══ -->
+  <div class="section" id="reiter_db">
+    <h2>Reiter „Datenbank &amp; Quellen“ im Überblick</h2>
+    <p>Hier richten Sie die Datenbank ein und halten sie aktuell. Der Reiter besteht aus vier Rahmen:</p>
+    <table>
+      <tr><th>Rahmen</th><th>Wofür</th></tr>
+      <tr><td><b>Geocodierungsdatenbank</b></td><td>Pfad der Datenbankdatei und Stand: Zahl der Adressen,
+        Bundesländer und Dateigröße. <em>Pfad speichern und Datenbank verwenden</em> übernimmt einen
+        geänderten Pfad.</td></tr>
+      <tr><td><b>Quellen je Bundesland</b></td><td>Tabelle aller 16 Länder mit Adressen in der Datenbank,
+        Quelle, <b>Bezug</b> und letztem Abruf. Der Stift am Zeilenende (oder ein Doppelklick) öffnet die
+        <a href="#detailseite">Detailseite</a> des Landes. Darunter die Knöpfe zum Aktualisieren und
+        Prüfen (siehe unten).</td></tr>
+      <tr><td><b>Postleitzahlen</b></td><td>Ob noch Adressen ohne PLZ vorhanden sind und welche PLZ-Gebiete
+        verwendet werden (siehe <a href="#plz">Postleitzahlen</a>).</td></tr>
+      <tr><td><b>Fortschritt</b></td><td>Fortschrittsbalken und Protokoll des laufenden Abrufs;
+        <em>Abbrechen</em> unten rechts.</td></tr>
+    </table>
+    <h3>Bezug</h3>
+    <ul>
+      <li><span style="color:#2e7d32"><b>Internet</b></span> — die Daten werden direkt beim Land geladen.</li>
+      <li><span style="color:#1565c0"><b>Datei</b></span> — eine eingetragene Datei auf diesem Rechner.</li>
+      <li><span style="color:#a15c00"><b>nicht eingetragen</b></span> — die Daten gibt es nur über ein
+        Portal (Shop, Anmeldung); derzeit betrifft das kein Land.</li>
+    </ul>
+    <h3>Knöpfe unter der Tabelle</h3>
+    <ul>
+      <li><em>Alle eingetragenen Quellen aktualisieren</em> — lädt für jedes Land mit Quelle die aktuellen
+        Daten und ersetzt dessen Bestand, <b>aber nur, wenn es seit dem letzten Abruf neue Daten
+        gibt</b>. Ob etwas neu ist, erkennt das Plugin am Datenstand, den der Server meldet, bzw. an einer
+        Prüfsumme der Datei.</li>
+      <li><em>Auch ohne neue Daten erneut laden</em> — erzwingt den Abruf, auch wenn nichts neu ist oder
+        die <a href="#sperre">Sperre nach Abruf</a> greift.</li>
+      <li><em>Quellenliste prüfen</em> — holt die aktuelle Liste der Download-Adressen (siehe
+        <a href="#quellenliste">Quellenliste online</a>).</li>
+    </ul>
+    <div class="tip"><b>Vollständigkeitsprüfung bei WFS-Quellen:</b> Vor dem Import vergleicht das Plugin
+    die Zahl der geladenen Adressen mit der Zahl, die der Dienst meldet. Weicht sie ab, bricht der Abruf ab
+    und der bisherige Bestand bleibt erhalten — ein unvollständiger Download ersetzt nie einen
+    vollständigen Bestand.</div>
+  </div>
+
+  <!-- ══ DETAILSEITE ══ -->
+  <div class="section" id="detailseite">
+    <h2>Detailseite eines Bundeslands</h2>
+    <p>Sie öffnen sie über den Stift in der Tabelle <em>Quellen je Bundesland</em> oder per Doppelklick
+    auf die Zeile. Oben stehen der Stand in der Datenbank und die <b>Standardquelle</b> mit Link.
+    Darunter legen Sie im Rahmen <em>Quelle für dieses Bundesland</em> die <b>Bezugsart</b> fest:</p>
+    <h3>Datei auf diesem Rechner</h3>
+    <p>Eine Adressdatei auf diesem Rechner oder einem Netzlaufwerk: HK-DE-Text (.txt/.csv), INSPIRE-GML,
+    Shapefile, OpenStreetMap-Extrakt (.osm.pbf) oder ein Zip davon (zu den Formaten siehe
+    <a href="#formate">Datenformate</a>). Das Format wird an der Datei erkannt. Die Vorschau zeigt zwei
+    Adressen und warnt, wenn die Datei Adressen eines anderen Bundeslands enthält; bei Shapefiles erscheint
+    eine Feldzuordnung. <em>Datei importieren</em> speichert die Angaben und importiert sofort. Ersetzen
+    Sie die Datei später durch eine neuere Fassung unter demselben Pfad, importiert <em>Alle eingetragenen
+    Quellen aktualisieren</em> sie automatisch erneut (erkannt an Größe und Änderungsdatum).</p>
+    <h3>Internetquellen</h3>
+    <p>Feste Datei-URL, Verzeichnisindex, Link auf einer Webseite, Atom-/RSS-Feed, CKAN-Datenkatalog,
+    WFS 2.0, Dateiliste als GeoJSON (je Kreis eine Datei), GaiaLight-Downloaddienst oder OGC API
+    Features. Für die Standardquellen ist alles vorbelegt; ändern müssen Sie hier normalerweise nichts.</p>
+    <ul>
+      <li><b>Platzhalter:</b> Eine feste Datei-URL darf Platzhalter enthalten, die beim Abruf ersetzt
+        werden: <code>{datum}</code> (heutiges Datum als JJJJMMTT, sonst gestern), <code>{jahr}</code> und
+        <code>{nr}</code> (Datenfassung wie „2026-01“; geprüft werden das laufende und das vorige Jahr —
+        die neueste vorhandene Fassung gilt).</li>
+      <li><b>Datenformat:</b> Auch <em>OpenStreetMap-Extrakt (.osm.pbf)</em> steht für eigene Quellen zur
+        Verfügung — als Datei oder Internetquelle.</li>
+      <li><b>Abrufart</b> (bei WFS): seitenweise oder in räumlichen Kacheln — Kacheln für Dienste, die beim
+        Blättern unzuverlässig sind.</li>
+      <li><b>Sperre nach Abruf:</b> siehe <a href="#sperre">Sperre nach Abruf</a>.</li>
+    </ul>
+    <h3>Knöpfe</h3>
+    <ul>
+      <li><em>Jetzt aktualisieren</em> — lädt nur dieses Land (nur bei neuen Daten, außer mit
+        <em>Auch ohne neue Daten erneut laden</em>).</li>
+      <li><em>Quelle prüfen</em> — testet die Erreichbarkeit, ohne etwas zu importieren.</li>
+      <li><em>Datei importieren</em> — bei Bezugsart <em>Datei auf diesem Rechner</em>.</li>
+      <li><em>Standardquelle wiederherstellen</em> — verwirft eine eigene Quelle; die Adressen in der
+        Datenbank bleiben erhalten.</li>
+    </ul>
+    <p>Wer nur aktualisiert und nichts ändert, behält die Standardquelle. Geänderte Angaben werden als
+    <b>eigene Quelle</b> im QGIS-Profil gespeichert, ersetzen die Standardquelle des Landes und überstehen
+    Plugin-Updates.</p>
+    <div class="tip"><b>Tipp für Portale mit JavaScript-Seiten:</b> Versteckt ein Portal den Download
+    hinter einer JavaScript-Seite, hat die Datei aber eine feste Adresse (im Browser unter
+    Entwicklerwerkzeuge → Netzwerk ablesbar), genügt Bezugsart <em>Feste Datei-URL</em> — dann wird das
+    Land wie die übrigen Internetquellen automatisch aktualisiert.</div>
+    <div class="tip">Bitte nur offen lizenzierte Quellen mit unmittelbarem Zugriff eintragen (z.&nbsp;B.
+    dl-de/by-2-0, dl-de/zero-2-0, CC BY 4.0) — keine Shops, Anmeldungen oder Portale mit Bot-Schutz — und
+    die Namensnennung laut Lizenz im Ergebnis bzw. in der Kartenquelle angeben.</div>
+  </div>
+
+  <!-- ══ SPERRE ══ -->
+  <div class="section" id="sperre">
+    <h2>Sperre nach Abruf</h2>
+    <p>Das Plugin lädt nie von selbst, sondern nur, wenn Sie <em>Alle eingetragenen Quellen
+    aktualisieren</em> oder auf der Detailseite <em>Jetzt aktualisieren</em> klicken. Einige Quellen melden
+    jedoch keinen Datenstand (z.&nbsp;B. die WFS-Dienste) oder ändern sich täglich (OpenStreetMap für
+    Bayern). Ohne Sperre würde jeder Klick den kompletten Bestand — teils mehrere Gigabyte — neu laden.</p>
+    <p>Diese Quellen werden beim Aktualisieren deshalb <b>übersprungen, solange der letzte Abruf weniger als
+    28 Tage zurückliegt</b>. Das betrifft derzeit Bayern, Brandenburg, Hamburg, Mecklenburg-Vorpommern,
+    Niedersachsen und das Saarland. Die Zusammenfassung meldet sie als <em>übersprungen</em>.</p>
+    <ul>
+      <li>Sofort laden: <em>Auch ohne neue Daten erneut laden</em> anhaken.</li>
+      <li>Dauer ändern: auf der Detailseite im Feld <em>Sperre nach Abruf</em>.</li>
+    </ul>
+    <p>Die Sperre ist kein Zeitplan — nach 28 Tagen wird nichts automatisch geladen.</p>
+  </div>
+
+  <!-- ══ QUELLENLISTE ══ -->
+  <div class="section" id="quellenliste">
+    <h2>Quellenliste online aktualisieren</h2>
+    <p>Welche Download-Adresse für welches Land gilt, steht in einer Quellenliste, die mit dem Plugin
+    geliefert wird. Ändert ein Land seinen Download, kommt die neue Adresse <b>ohne neue Plugin-Version</b>
+    an: <em>Quellenliste prüfen</em> lädt die aktuelle Liste von der Projektseite des Plugins auf GitHub.
+    Das geschieht auch automatisch vor <em>Alle eingetragenen Quellen aktualisieren</em>. Unter der Tabelle
+    steht, welche Liste gilt und von wann sie ist.</p>
+    <ul>
+      <li>Die Online-Liste wird nur verwendet, wenn sie <b>neuer</b> ist als die mitgelieferte. Sie wird im
+        QGIS-Profil gespeichert und gilt auch ohne Internet weiter.</li>
+      <li><b>Eigene Quellen haben immer Vorrang</b> und werden nie überschrieben.</li>
+      <li>Die Liste enthält nur Daten, kein Programm. Einträge, die das Plugin nicht kennt (z.&nbsp;B. ein
+        neuer Abruf-Typ für eine spätere Version), werden übergangen — für dieses Land gilt dann die
+        mitgelieferte Quelle. Eine Online-Liste darf nur auf Internetadressen verweisen, nie auf Dateien
+        dieses Rechners.</li>
+      <li>Abgerufen wird nur auf Klick, nie beim Start von QGIS. GitHub sieht dabei wie bei jedem Download
+        die IP-Adresse des Rechners; Adressdaten werden nicht übertragen.</li>
+    </ul>
+  </div>
+
+  <!-- ══ AUSWEICHQUELLEN ══ -->
+  <div class="section" id="ausweich">
+    <h2>Ausweichquellen und Schutz des Bestands</h2>
+    <p>Für ein Land kann eine <b>Ausweichquelle</b> hinterlegt sein, die einspringt, wenn die Hauptquelle
+    scheitert. Derzeit gilt das für Thüringen: Ist die Datei des Landes nicht erreichbar, dient der ältere
+    INSPIRE-Download als Ersatz — aber nur, solange noch keine Thüringer Adressen in der Datenbank sind
+    (er ist älter, und rund 66.000 Adressen fehlt die Koordinate).</p>
+    <p>Außerdem schützt das Plugin den vorhandenen Bestand:</p>
+    <ul>
+      <li>Liefert eine Quelle eine Webseite statt der Datei (z.&nbsp;B. bei Wartungsarbeiten) oder enthält
+        eine Datei keine Adressen, bleibt der bisherige Bestand des Landes erhalten.</li>
+      <li>Ein unvollständiger WFS-Download ersetzt nie einen vollständigen Bestand (siehe
+        <a href="#reiter_db">Vollständigkeitsprüfung</a>).</li>
+      <li>Ein Fehler bei einem Land bricht die übrigen nicht ab.</li>
+    </ul>
+  </div>
+
+  <!-- ══ BUNDESLÄNDER ══ -->
+  <div class="section" id="bundeslaender">
+    <h2>Die Quellen der 16 Bundesländer</h2>
+    <p>Alle 16 Bundesländer lädt das Plugin selbst — mit einem Klick auf <em>Alle eingetragenen Quellen
+    aktualisieren</em>.</p>
+    <!-- TABELLE:laender -->
+    <table>
+      <tr><th>Bundesland</th><th>Daten</th><th>Postleitzahlen</th><th>Abruf</th></tr>
+      <tr><td>Baden-Württemberg</td><td>HK-DE-Text</td><td>ergänzt aus den PLZ-Gebieten</td><td>✅ automatisch</td></tr>
+      <tr><td>Bayern</td><td>OpenStreetMap (.osm.pbf) (nicht amtlich)</td><td>aus der Quelle</td><td>✅ automatisch</td></tr>
+      <tr><td>Berlin</td><td>HK-DE-Text</td><td>aus der Quelle</td><td>✅ automatisch</td></tr>
+      <tr><td>Brandenburg</td><td>INSPIRE-GML</td><td>ergänzt aus den PLZ-Gebieten</td><td>✅ automatisch</td></tr>
+      <tr><td>Bremen</td><td>Shapefile</td><td>aus der Quelle</td><td>✅ automatisch</td></tr>
+      <tr><td>Hamburg</td><td>INSPIRE-GML</td><td>aus der Quelle</td><td>✅ automatisch</td></tr>
+      <tr><td>Hessen</td><td>HK-DE-Text</td><td>ergänzt aus den PLZ-Gebieten</td><td>✅ automatisch</td></tr>
+      <tr><td>Mecklenburg-Vorpommern</td><td>INSPIRE-GML</td><td>ergänzt aus den PLZ-Gebieten</td><td>✅ automatisch</td></tr>
+      <tr><td>Niedersachsen</td><td>ALKIS-GeoPackage</td><td>ergänzt aus den PLZ-Gebieten</td><td>✅ automatisch</td></tr>
+      <tr><td>Nordrhein-Westfalen</td><td>HK-DE-Text</td><td>ergänzt aus den PLZ-Gebieten</td><td>✅ automatisch</td></tr>
+      <tr><td>Rheinland-Pfalz</td><td>HK-DE-Text</td><td>ergänzt aus den PLZ-Gebieten</td><td>✅ automatisch</td></tr>
+      <tr><td>Saarland</td><td>GeoJSON</td><td>aus der Quelle</td><td>✅ automatisch</td></tr>
+      <tr><td>Sachsen</td><td>HK-DE-Text</td><td>aus der Quelle</td><td>✅ automatisch</td></tr>
+      <tr><td>Sachsen-Anhalt</td><td>HK-DE-Text</td><td>ergänzt aus den PLZ-Gebieten</td><td>✅ automatisch</td></tr>
+      <tr><td>Schleswig-Holstein</td><td>HK-DE-Text</td><td>aus der Quelle</td><td>✅ automatisch</td></tr>
+      <tr><td>Thüringen</td><td>HK-DE-Text</td><td>ergänzt aus den PLZ-Gebieten</td><td>✅ automatisch</td></tr>
+    </table>
+    <!-- /TABELLE:laender -->
+    <h3>Wie und wo die Daten abgerufen werden</h3>
+    <!-- TABELLE:abruf -->
+    <table>
+      <tr><th>Bundesland</th><th>Zugriff</th><th>Format</th><th>Hinweis</th></tr>
+      <tr><td>Baden-Württemberg</td><td>opengeodata.lgl-bw.de, feste Datei-URL</td><td>HK-DE-Text</td><td>Rund 3 Mio. Gebäudepositionen, ohne Postleitzahlen – sie werden automatisch ergänzt. Gebäude ohne echte Hausnummer (Pseudo-Nummern aus Koordinaten) werden übergangen.</td></tr>
+      <tr><td>Bayern</td><td>download.geofabrik.de, feste Datei-URL</td><td>OpenStreetMap (.osm.pbf)</td><td>Nicht amtlich: rund 2,5 Mio. Adressen aus OpenStreetMap (© OpenStreetMap-Mitwirkende, ODbL). Amtliche Hauskoordinaten gibt es in Bayern nur kostenpflichtig. Beim Aktualisieren übersprungen, solange der letzte Abruf weniger als 28 Tage zurückliegt. Abruf: rund 10 Minuten.</td></tr>
+      <tr><td>Berlin</td><td>gdi.berlin.de, Atom-Feed</td><td>HK-DE-Text</td><td>Rund 395.000 Adressen mit Postleitzahlen.</td></tr>
+      <tr><td>Brandenburg</td><td>inspire.brandenburg.de, INSPIRE-WFS</td><td>INSPIRE-GML</td><td>Rund 870.000 Adressen, ohne Postleitzahlen – sie werden automatisch ergänzt. Beim Aktualisieren übersprungen, solange der letzte Abruf weniger als 28 Tage zurückliegt. Abruf: rund eine Stunde (ca. 1,7 GB).</td></tr>
+      <tr><td>Bremen</td><td>gdi2.geo.bremen.de, feste Datei-URL</td><td>Shapefile</td><td>Rund 176.000 Adressen mit Postleitzahlen (Bremen und Bremerhaven).</td></tr>
+      <tr><td>Hamburg</td><td>geodienste.hamburg.de, INSPIRE-WFS</td><td>INSPIRE-GML</td><td>Rund 300.000 Adressen mit Postleitzahlen. Beim Aktualisieren übersprungen, solange der letzte Abruf weniger als 28 Tage zurückliegt. Abruf: rund 10–15 Minuten.</td></tr>
+      <tr><td>Hessen</td><td>gds.hessen.de, feste Datei-URL</td><td>HK-DE-Text</td><td>Rund 1,6 Mio. Adressen, ohne Postleitzahlen – sie werden automatisch aus den mitgelieferten PLZ-Gebieten ergänzt.</td></tr>
+      <tr><td>Mecklenburg-Vorpommern</td><td>www.geodaten-mv.de, INSPIRE-WFS</td><td>INSPIRE-GML</td><td>Rund 520.000 Adressen, ohne Postleitzahlen – sie werden automatisch aus den mitgelieferten PLZ-Gebieten ergänzt. Beim Aktualisieren übersprungen, solange der letzte Abruf weniger als 28 Tage zurückliegt. Abruf: etwa 25 Minuten.</td></tr>
+      <tr><td>Niedersachsen</td><td>arcgis-geojson.s3.eu-de.cloud-object-storage.appdomain.cloud, Dateiliste je Kreis</td><td>ALKIS-GeoPackage</td><td>Rund 2,6 Mio. Adressen aus den ALKIS-Gebäuden aller 45 Kreise, ohne Postleitzahlen – sie werden automatisch ergänzt. Beim Aktualisieren übersprungen, solange der letzte Abruf weniger als 28 Tage zurückliegt. Abruf: rund 20 Minuten (4,4 GB).</td></tr>
+      <tr><td>Nordrhein-Westfalen</td><td>www.opengeodata.nrw.de, Verzeichnisindex</td><td>HK-DE-Text</td><td>Rund 4,5 Mio. Adressen, ohne Postleitzahlen – sie werden automatisch aus den mitgelieferten PLZ-Gebieten ergänzt. Abruf: einige Minuten.</td></tr>
+      <tr><td>Rheinland-Pfalz</td><td>geobasis-rlp.de, feste Datei-URL</td><td>HK-DE-Text</td><td>Rund 1,4 Mio. Adressen, ohne Postleitzahlen – sie werden automatisch ergänzt.</td></tr>
+      <tr><td>Saarland</td><td>geoportal.saarland.de, OGC API Features</td><td>GeoJSON</td><td>Rund 335.000 Adressen mit Postleitzahlen; als Ort dient der Postort. Beim Aktualisieren übersprungen, solange der letzte Abruf weniger als 28 Tage zurückliegt. Abruf: rund 10 Minuten.</td></tr>
+      <tr><td>Sachsen</td><td>www.geodaten.sachsen.de, Link auf der Downloadseite</td><td>HK-DE-Text</td><td>Rund 990.000 Adressen mit Postleitzahlen.</td></tr>
+      <tr><td>Sachsen-Anhalt</td><td>geodatenportal.sachsen-anhalt.de, feste Datei-URL</td><td>HK-DE-Text</td><td>Rund 660.000 Adressen (Gebäudereferenzen), ohne Postleitzahlen – sie werden automatisch ergänzt.</td></tr>
+      <tr><td>Schleswig-Holstein</td><td>geodaten.schleswig-holstein.de, Downloaddienst (Auftrag)</td><td>HK-DE-Text</td><td>Rund 955.000 Adressen mit Postleitzahlen (aus dem Liegenschaftskataster, ohne Abgleich mit der Post).</td></tr>
+      <tr><td>Thüringen</td><td>geoportal.geoportal-th.de, feste Datei-URL; Ausweichquelle: www.geoproxy.geoportal-th.de</td><td>HK-DE-Text</td><td>Rund 620.000 Adressen, ohne Postleitzahlen – sie werden automatisch ergänzt. Ist die Datei des Landes nicht erreichbar, dient der ältere INSPIRE-Download als Ersatz – aber nur, solange noch keine Thüringer Adressen in der Datenbank sind.</td></tr>
+    </table>
+    <!-- /TABELLE:abruf -->
+    <p>Die Dauerangaben in dieser Tabelle stammen aus der Quellenliste; aktuelle Messwerte stehen unter
+    <a href="#aufwand">Aufwand je Bundesland</a>. Links und Lizenzen der Quellen:
+    <a href="#policy">Lizenzen und Quellenvermerke</a>.</p>
+    <h3>Besonderheiten einzelner Länder</h3>
+    <ul>
+      <li><strong>Bayern:</strong> Amtliche Gebäudeadressen gibt es nur <strong>gebührenpflichtig</strong>.
+        Das Plugin lädt deshalb den OpenStreetMap-Extrakt von Geofabrik und wandelt ihn selbst um (siehe
+        <a href="#osm">OpenStreetMap als Quelle</a>) — nicht amtlich, Lizenz ODbL. Amtliche Daten lassen
+        sich kaufen und als eigene Datei eintragen (siehe <a href="#hk_kaufen">Amtliche Hauskoordinaten
+        kaufen</a>).</li>
+      <li><strong>Niedersachsen:</strong> ALKIS-Daten des LGLN je Kreis (45 Dateien, zusammen rund
+        4,4&nbsp;GB). Übernommen werden die Gebäude mit Straße und Hausnummer; die Gemeinde kommt aus den
+        Flurstücken derselben Datei, die PLZ aus den PLZ-Gebieten. Jede Kreisdatei wird nach der Umwandlung
+        gleich wieder gelöscht.</li>
+      <li><strong>Baden-Württemberg:</strong> Die landesweite Datei enthält auch Gebäude ohne echte
+        Hausnummer (aus Koordinaten gebildete Pseudo-Nummern); sie werden beim Import übergangen.</li>
+      <li><strong>Hessen:</strong> Das Downloadcenter legt die Datei täglich unter einem neuen Datumsordner
+        ab; Tagesdatum und Datenfassung ermittelt das Plugin beim Abruf.</li>
+      <li><strong>Schleswig-Holstein:</strong> Der Downloaddienst des Landes stellt die Datei als Auftrag
+        zusammen; das Plugin startet den Auftrag, wartet und lädt die Datei.</li>
+      <li><strong>Brandenburg:</strong> Die Hauskoordinaten gibt es nur über den (derzeit abgeschalteten)
+        Geobroker; das Plugin lädt daher die INSPIRE-Adressen aus dem WFS in räumlichen Kacheln.</li>
+      <li><strong>Hamburg:</strong> Geladen wird der aktuelle Stand aus dem WFS des Datensatzes
+        <a href="https://suche.transparenz.hamburg.de/dataset/inspire-hh-adressen-hauskoordinaten22" target="_blank">INSPIRE HH Adressen Hauskoordinaten</a>;
+        die dort angebotenen Zip-Dateien enden 2020.</li>
+      <li><strong>Sachsen-Anhalt:</strong> Frei verfügbar sind die Gebäudereferenzen (ohne PLZ);
+        vollständige Hauskoordinaten gibt es nur auf Antrag.</li>
+      <li><strong>Thüringen:</strong> Hauptquelle ist die HK-DE-Datei des Landes, mit Ausweichquelle (siehe
+        <a href="#ausweich">Ausweichquellen</a>).</li>
+      <li><strong>Saarland:</strong> Die Hauskoordinaten kommen über eine OGC-API-Features-Schnittstelle;
+        als Ort dient der Postort (die Gemeinde steht dort nur als Schlüssel).</li>
+      <li><strong>Bremen:</strong> Shapefile mit Adresspunkten (Bremen und Bremerhaven).</li>
+      <li><strong>Rheinland-Pfalz:</strong> In den Daten steht als Gemeinde oft der <em>Ortsteil</em>
+        (z.&nbsp;B. „Harbach“) statt der Stadt (z.&nbsp;B. „Altenkirchen“). Die lokale Suche trifft am
+        besten, wenn als Ort der Ortsteil angegeben ist; sonst greift gegebenenfalls Nominatim.</li>
+    </ul>
+  </div>
+
+  <!-- ══ PLZ ══ -->
+  <div class="section" id="plz">
+    <h2>Postleitzahlen: mitgelieferte PLZ-Gebiete</h2>
+    <p>Viele amtliche Hauskoordinaten enthalten keine Postleitzahl (z.&nbsp;B. Nordrhein-Westfalen und
+    Mecklenburg-Vorpommern). Damit die PLZ trotzdem für die Suche zur Verfügung steht, liefert das Plugin
+    die <strong>PLZ-Gebiete Deutschlands</strong> mit und ergänzt fehlende PLZ automatisch anhand der Lage
+    des Adresspunkts:</p>
+    <ul>
+      <li><strong>beim Import</strong> jeder Datei (automatisch oder von Hand, alle Formate) für Adressen
+        ohne PLZ,</li>
+      <li><strong>beim Aktualisieren der Quellen</strong> für bereits vorhandene Adressen ohne PLZ — auch in
+        Ländern ohne neue Daten.</li>
+    </ul>
+    <p>PLZ aus den amtlichen Quellen haben immer Vorrang und werden nie überschrieben. Bringt eine neue
+    Plugin-Version neuere PLZ-Gebiete mit, werden nur die ergänzten PLZ beim nächsten Aktualisieren neu
+    berechnet. Eine Einstellung ist nicht nötig.</p>
+    <table>
+      <tr><th>Angabe</th><th>Wert</th></tr>
+      <tr><td>Daten</td><td>8.172 PLZ-Gebiete, auf 5&nbsp;m vereinfacht, Stand 24.10.2026</td></tr>
+      <tr><td>Quelle</td><td>Direkt aus <a href="https://www.openstreetmap.org" target="_blank">OpenStreetMap</a>: die Grenzen der Postleitzahlgebiete, gelesen aus dem <a href="https://download.geofabrik.de/europe/germany.html" target="_blank">Deutschland-Extrakt von Geofabrik</a></td></tr>
+      <tr><td>Lizenz</td><td><a href="https://opendatacommons.org/licenses/odbl/1-0/" target="_blank">Open Database License (ODbL) 1.0</a> — Namensnennung: <em>© OpenStreetMap-Mitwirkende</em></td></tr>
+      <tr><td>Genauigkeit</td><td>99,8&nbsp;% Übereinstimmung mit amtlichen PLZ (Stichprobe); Abweichungen vor allem an PLZ-Grenzen</td></tr>
+    </table>
+    <p><strong>Eigene PLZ-Gebiete:</strong> Im Rahmen <em>Postleitzahlen</em> des Reiters „Datenbank &amp;
+    Quellen“ lässt sich über <em>Eigene PLZ-Gebiete …</em> eine eigene Datei setzen (GeoPackage,
+    Shapefile, GeoJSON), z.&nbsp;B. lizenzierte PLZ-Gebiete der Deutschen Post. <em>Mitgelieferte
+    verwenden</em> stellt den Standard wieder her.</p>
+    <div class="tip"><strong>Lizenzhinweis:</strong> Die ergänzten Postleitzahlen beruhen auf
+    OpenStreetMap-Daten (© OpenStreetMap-Mitwirkende, ODbL). Bei Weitergabe von Ergebnissen ist die
+    Namensnennung anzugeben. Wird eine Geocodierungsdatenbank mitsamt PLZ-Gebieten weitergegeben, gilt für
+    diesen Teil die ODbL.</div>
+  </div>
+
+  <!-- ══ OSM ══ -->
+  <div class="section" id="osm">
+    <h2>OpenStreetMap als Quelle (Bayern)</h2>
+    <p>Für Bayern lädt das Plugin den Extrakt <code>bayern-latest.osm.pbf</code> von
+    <a href="https://download.geofabrik.de/europe/germany/bayern.html" target="_blank">Geofabrik</a>
+    (rund 860&nbsp;MB) und wandelt ihn mit den Werkzeugen von QGIS in Adressen um:</p>
+    <ul>
+      <li>Übernommen werden alle Objekte mit Hausnummer und Straße (bzw. Platzname): Adresspunkte, Gebäude
+        und Linien. Hausnummern-Listen wie „5;7“ ergeben je Nummer eine Adresse.</li>
+      <li>Doppelte Adressen (z.&nbsp;B. Adresspunkt <em>und</em> Gebäude) werden zusammengeführt.</li>
+      <li>Der Ort kommt aus der Adressangabe in OpenStreetMap; fehlt sie, wird er aus den Gemeindegrenzen
+        im selben Extrakt bestimmt. Der Ortsteil dient der Suche als zusätzlicher Name.</li>
+      <li>Fehlende Postleitzahlen ergänzt das Plugin aus den PLZ-Gebieten.</li>
+    </ul>
+    <p>Download, Umwandlung und Import dauern zusammen rund 8–10 Minuten (zuletzt rund 2,5&nbsp;Mio.
+    Adressen). Da sich OpenStreetMap täglich ändert, gilt eine <a href="#sperre">Sperre nach Abruf</a> von
+    28 Tagen. Die Bayern-Daten sind nicht amtlich und stehen unter der ODbL (siehe
+    <a href="#policy">Lizenzen</a>).</p>
+
+    <div class="info" id="hk_kaufen"><strong>Amtliche Hauskoordinaten kaufen:</strong> Die Zentrale Stelle
+    Hauskoordinaten und Hausumringe (ZSHH) beim Landesamt für Digitalisierung, Breitband und Vermessung
+    Bayern vertreibt die amtlichen Hauskoordinaten aller Länder als bundesweit einheitliche HK-DE-Datei
+    (rund 23&nbsp;Mio. Adressen, zweimal jährlich aktualisiert; laut Anbieter ab 6.000&nbsp;€):
+    <a href="https://www.ldbv.bayern.de/vermessung/zshh/hk-de.html" target="_blank">ZSHH – Hauskoordinaten
+    Deutschland (HK-DE)</a>. Wer amtliche Daten für Bayern (oder ein anderes Land) erworben hat, trägt die
+    Datei auf der <a href="#detailseite">Detailseite</a> des Landes als <em>Datei auf diesem Rechner</em> ein —
+    sie ersetzt dann die Standardquelle.</div>
+  </div>
+
+  <!-- ══ AUSGABEFELDER ══ -->
+  <div class="section" id="felder">
+    <h2>Ergebnis: Ausgabefelder im GeoPackage-Layer</h2>
+    <p>Zusätzlich zu den Spalten der Eingabedatei enthält der Layer diese Felder:</p>
+    <table>
+      <tr><th>Feldname</th><th>Typ</th><th>Quelle</th><th>Beschreibung</th></tr>
+      <tr><td><code>geocoder_address</code></td><td>Text</td><td>Beide</td><td>Gesendete Adressanfrage.</td></tr>
+      <tr><td><code>geocoder_source</code></td><td>Text</td><td>Beide</td><td>Verwendete Quelle: <code>Lokal (…)</code>, <code>Nominatim</code> oder <code>Nominatim (Fallback)</code>.</td></tr>
+      <tr><td><code>geocoded</code></td><td>Ganzzahl</td><td>Beide</td><td><code>1</code> = Treffer, <code>0</code> = nicht gefunden.</td></tr>
+      <tr><td><code>name</code></td><td>Text</td><td>Beide</td><td>Lokal: Straße + Hausnummer des Treffers; Nominatim: Name des OSM-Objekts.</td></tr>
+      <tr><td><code>addresstype</code></td><td>Text</td><td>Nominatim</td><td>Art des Treffers: <code>building</code>, <code>road</code>, <code>city</code> usw.</td></tr>
+      <tr><td><code>importance</code></td><td>Dezimal</td><td>Nominatim</td><td>Relevanz 0–1. Bei lokal immer leer.</td></tr>
+      <tr><td><code>type</code></td><td>Text</td><td>Nominatim</td><td>OSM-Untertyp: <code>fire_station</code>, <code>residential</code> usw.</td></tr>
+      <tr><td><code>category</code></td><td>Text</td><td>Nominatim</td><td>OSM-Hauptkategorie: <code>amenity</code>, <code>highway</code> usw.</td></tr>
+      <tr><td><code>accuracy_level</code></td><td>Ganzzahl</td><td>Beide</td><td>Genauigkeitsstufe 0–5 (siehe unten).</td></tr>
+      <tr><td><code>accuracy_label</code></td><td>Text</td><td>Beide</td><td>Genauigkeit in Worten: <em>Hausnummer</em>, <em>Straße</em>, <em>Stadt</em> usw.</td></tr>
+      <tr><td><code>local_score</code></td><td>Dezimal</td><td>Lokal</td><td>Übereinstimmung 0–1 (siehe <a href="#local_score">Fuzzy-Score</a>). Bei Nominatim leer.</td></tr>
+      <tr><td><code>local_score_label</code></td><td>Text</td><td>Lokal</td><td><em>Exakt / Sehr gut / Gut / Unsicher / Schwach</em>.</td></tr>
+      <tr><td><code>lat</code></td><td>Dezimal</td><td>Beide</td><td>Breitengrad WGS84 (auch bei aktivem Versatz unverändert).</td></tr>
+      <tr><td><code>lon</code></td><td>Dezimal</td><td>Beide</td><td>Längengrad WGS84 (auch bei aktivem Versatz unverändert).</td></tr>
+    </table>
+  </div>
+
+  <!-- ══ GENAUIGKEIT ══ -->
+  <div class="section" id="accuracy">
+    <h2>Ergebnis: Genauigkeitsstufen (accuracy_level)</h2>
+    <table>
+      <tr><th>Stufe</th><th>Label</th><th>Bedeutung</th></tr>
+      <tr><td><span class="badge l5">5</span></td><td>Haus / Gebäude / Hausnummer / Einrichtung</td><td>Höchste Genauigkeit. Lokal: angegebene Hausnummer exakt gefunden. Nominatim: Gebäude oder Einrichtung.</td></tr>
+      <tr><td><span class="badge l4">4</span></td><td>Straße (Mittelpunkt) / Straße (nächste Hausnummer)</td><td>Straßenebene. Ohne Hausnummer in der Eingabe: der Adresspunkt, der der Mitte der Straße am nächsten liegt. Hausnummer angegeben, aber nicht vorhanden: der Punkt der numerisch nächsten Hausnummer; deren Nummer steht im Feld <code>name</code>. Es wird keine Hausnummer erfunden.</td></tr>
+      <tr><td><span class="badge l3">3</span></td><td>PLZ</td><td>Lokal: Mitte aller Adresspunkte der PLZ (in Städten feiner als der ganze Ort). Nominatim: Postleitzahl bzw. Stadtteil.</td></tr>
+      <tr><td><span class="badge l2">2</span></td><td>Stadt / Gemeinde / Ort</td><td>Lokal: Mitte der gesamten Gemeinde (bei reiner Ortsangabe). Nominatim: Stadt, Ort oder Gemeinde.</td></tr>
+      <tr><td><span class="badge l1">1</span></td><td>Landkreis / Bundesland</td><td>Sehr grob (nur Nominatim).</td></tr>
+      <tr><td><span class="badge l0">0</span></td><td>Kein Treffer / Land</td><td>Keine verwertbare Zuordnung.</td></tr>
+    </table>
+    <div class="tip">Bei unvollständigen Angaben setzt die lokale Suche einen Näherungspunkt statt gar
+    keiner Geometrie: nur PLZ → Mitte des PLZ-Gebiets (Stufe&nbsp;3), nur Ort → Mitte der Gemeinde
+    (Stufe&nbsp;2). Das gilt auch, wenn die Straße nicht gefunden wird, PLZ oder Ort aber bekannt sind.
+    <code>local_score</code> ist dann leer und <code>local_score_label</code> lautet „Näherung
+    (Schwerpunkt)“.</div>
+  </div>
+
+  <!-- ══ LOCAL SCORE ══ -->
+  <div class="section" id="local_score">
+    <h2>Ergebnis: Fuzzy-Score der lokalen Suche (local_score)</h2>
+    <p>Die lokale Suche ist fehlertolerant („unscharf“, englisch <em>fuzzy</em>): Sie findet Adressen auch
+    bei Tippfehlern und abweichender Schreibweise und bewertet, wie gut der Treffer zur Eingabe passt.</p>
+    <table>
+      <tr><th>Score</th><th>Label</th><th>Bedeutung</th></tr>
+      <tr><td>≥ 0,92</td><td><em>Exakt</em></td><td>Vollständige Übereinstimmung.</td></tr>
+      <tr><td>≥ 0,75</td><td><em>Sehr gut</em></td><td>Minimale Abweichungen (z.&nbsp;B. Abkürzung statt Vollform).</td></tr>
+      <tr><td>≥ 0,55</td><td><em>Gut</em></td><td>Leichte Abweichungen, Treffer zuverlässig.</td></tr>
+      <tr><td>≥ 0,40</td><td><em>Unsicher</em></td><td>Merkliche Abweichungen — bitte prüfen.</td></tr>
+      <tr><td>&lt; 0,40</td><td><em>Schwach</em></td><td>Großer Unterschied zur Eingabe — Treffer zweifelhaft.</td></tr>
+    </table>
+    <h3>Was die Suche ausgleicht</h3>
+    <ul>
+      <li>Abkürzungen: „Marienstr.“ → „Marienstraße“, „Päpinghauser Str.“ → „Päpinghauser Straße“.</li>
+      <li>ß/ss: „Grosse Straße“ findet „Große Straße“.</li>
+      <li>Orte: Ortsteile und Bezirke („Blankenese“ → Hamburg, „Pankow“ → Berlin), „Berlin-Mitte“ und
+        Kurznamen („Oldenburg“ → Oldenburg (Oldenb.)) werden aufgelöst. Bleibt ein Ortsname ohne PLZ oder
+        Bundesland mehrdeutig, steht im Label „Ort mehrdeutig (N Orte) — … gewählt“.</li>
+      <li>Treffer aus einem anderen Ort werden verworfen — außer die PLZ stimmt genau.</li>
+    </ul>
+    <h3>Wie der Score entsteht</h3>
+    <table>
+      <tr><th>Angabe</th><th>Gewicht</th><th>Hinweis</th></tr>
+      <tr><td>Straßenname</td><td>45&nbsp;% (55&nbsp;% ohne PLZ, bis 85&nbsp;% ohne Hausnummer)</td><td>Ähnlichkeit der Schreibweise; das wichtigste Feld.</td></tr>
+      <tr><td>Hausnummer</td><td>25&nbsp;%</td><td>Exakt = voll, nur Buchstabenzusatz abweichend (12 → 12a) = halb. Zählt nur bei gutem Straßentreffer — eine passende Nummer in einer falschen Straße überholt nicht die richtige Straße.</td></tr>
+      <tr><td>Gemeinde/Ort</td><td>15&nbsp;% (20&nbsp;% ohne PLZ)</td><td>Bestätigt den Treffer.</td></tr>
+      <tr><td>Postleitzahl</td><td>15&nbsp;%</td><td>Nur bei genauer Übereinstimmung.</td></tr>
+    </table>
+    <p>Fehlt eine Angabe in der Eingabe, wird ihr Gewicht auf die übrigen verteilt — vor allem auf die
+    Straße. Eine Eingabe ohne Hausnummer oder ohne PLZ wird dadurch nicht pauschal abgewertet. Die
+    räumliche Genauigkeit zeigt davon unabhängig <code>accuracy_level</code> (z.&nbsp;B. 4 = Straße, auch
+    wenn der Score „Exakt“ ist).</p>
+  </div>
+
+  <!-- ══ NICHT GEFUNDEN ══ -->
+  <div class="section" id="nichtgefunden">
+    <h2>Ergebnis: Nicht gefundene Adressen</h2>
+    <p>Was mit Adressen ohne Treffer geschieht, steuert die Option <em>„Nicht gefundene Adressen
+    aussortieren und als CSV ablegen“</em> (siehe <a href="#optionen">Optionen</a>). In beiden Fällen
+    werden sie am Ende im Protokoll aufgelistet.</p>
+    <table>
+      <tr><th>Option</th><th>Verhalten</th></tr>
+      <tr><td>aus (Standard)</td><td>Nicht gefundene Adressen bleiben <strong>ohne Geometrie</strong> im Ergebnis-Layer: <code>geocoded</code> = 0, <code>accuracy_level</code> = 0, <code>accuracy_label</code> = „Nicht gefunden“, <code>lat</code>/<code>lon</code> leer.</td></tr>
+      <tr><td>an</td><td>Der Layer enthält <strong>nur Treffer</strong>; die übrigen Adressen stehen in <code>&lt;Layer-Name&gt;_nicht_gefunden.csv</code> neben dem GeoPackage.</td></tr>
+    </table>
+    <div class="tip">Zeilen ohne Geometrie filtern: <code>"geocoded" = 0</code> — oder in der
+    Werkzeugkiste <em>Vektorgeometrie → Leergeometrien entfernen</em>.</div>
+    <p><strong>Häufige Gründe:</strong> Das Bundesland der Adresse ist nicht in der Datenbank geladen
+    (im DSGVO-Modus), die Straße ist falsch geschrieben oder neu, oder der Ort ist mehrdeutig und keine
+    PLZ angegeben. Eine PLZ in der Eingabe hilft oft schon.</p>
+  </div>
+
+  <!-- ══ FORMATE ══ -->
+  <div class="section" id="formate">
+    <h2>Anhang: Datenformate (technisch)</h2>
+    <p>Diese Angaben brauchen Sie nur, wenn Sie auf der <a href="#detailseite">Detailseite</a> eine eigene
+    Datei oder Internetquelle eintragen.</p>
+    <table>
+      <tr><th>Format</th><th>Beschreibung</th><th>Verwendet für</th></tr>
+      <tr><td>HK-DE-Text</td><td>„Hauskoordinaten Deutschland“: bundesweiter Standard der Vermessungsverwaltungen (AdV), semikolongetrennte Textdatei mit Bundesland, Kreis, Gemeinde, Straße, Hausnummer, Zusatz, UTM-Zone sowie Rechts- und Hochwert.</td><td>Baden-Württemberg, Berlin, Hessen, Nordrhein-Westfalen, Rheinland-Pfalz, Sachsen, Sachsen-Anhalt, Schleswig-Holstein, Thüringen</td></tr>
+      <tr><td>INSPIRE-GML</td><td>INSPIRE ist die europäische Richtlinie für Geodaten; ihre Adressen werden als GML (eine XML-Datei für Geodaten) geliefert, meist über einen WFS. Eine Datei enthält Adressen, Straßennamen, Postleitzahlen und Verwaltungseinheiten getrennt; das Plugin setzt sie zusammen.</td><td>Brandenburg, Hamburg, Mecklenburg-Vorpommern; Thüringen (Ausweichquelle)</td></tr>
+      <tr><td>Shapefile</td><td>Verbreitetes GIS-Dateiformat (auch als Zip). Adresspunkte oder Gebäudeumrisse; die Feldnamen werden zugeordnet (siehe unten).</td><td>Bremen</td></tr>
+      <tr><td>OpenStreetMap (.osm.pbf)</td><td>Extrakt der freien Weltkarte OpenStreetMap; siehe <a href="#osm">OpenStreetMap als Quelle</a>.</td><td>Bayern</td></tr>
+      <tr><td>ALKIS-GeoPackage</td><td>ALKIS ist das amtliche Liegenschaftskataster. Übernommen werden Gebäude mit Straße und Hausnummer; die Gemeinde kommt aus den Flurstücken derselben Datei.</td><td>Niedersachsen (je Kreis eine Datei)</td></tr>
+      <tr><td>OGC API Features (GeoJSON)</td><td>Moderne Internet-Schnittstelle für Geodaten, die seitenweise GeoJSON liefert.</td><td>Saarland</td></tr>
+    </table>
+    <h3>Shapefile: Geometrie und Feldzuordnung</h3>
+    <ul>
+      <li><strong>Adresspunkte</strong> (z.&nbsp;B. ALKIS „Georeferenzierte Gebäudeadresse“): Die
+        Koordinate wird direkt übernommen.</li>
+      <li><strong>Gebäudeumrisse (Flächen):</strong> Als Koordinate dient ein Punkt, der sicher innerhalb
+        des Gebäudes liegt.</li>
+    </ul>
+    <p>Objekte ohne Straßenangabe werden übersprungen. Die Feldzuordnung erscheint auf der Detailseite,
+    sobald eine Shapefile-Datei (oder ein Zip damit) gewählt ist; häufige Feldnamen werden vorbelegt, und
+    die Zuordnung wird mit der Quelle gespeichert. Koordinaten werden bei Bedarf automatisch umgerechnet.</p>
+    <table>
+      <tr><th>Feld</th><th>Pflicht</th><th>Hinweis</th></tr>
+      <tr><td>Straße</td><td>✅</td><td>Straßenname</td></tr>
+      <tr><td>Hausnummer</td><td>✅</td><td>Wird auf Plausibilität geprüft (1–4 Ziffern)</td></tr>
+      <tr><td>Hausnr.-Zusatz</td><td>–</td><td>z.&nbsp;B. „a“, „b“</td></tr>
+      <tr><td>Postleitzahl</td><td>–</td><td></td></tr>
+      <tr><td>Stadt / Ort</td><td>–</td><td>Bleibt dies leer, wird der Name des Bundeslands als Ort gespeichert (wie bei Berlin)</td></tr>
+    </table>
+    <h3>Koordinaten</h3>
+    <p>Die amtlichen Hauskoordinaten liegen je nach Land in UTM Zone 32N (EPSG:25832) oder 33N
+    (EPSG:25833). Das Plugin erkennt die Zone und rechnet die Ergebnisse nach WGS84 (EPSG:4326) um.</p>
+    <h3 id="plz_praefixe">Bundesland-Erkennung: PLZ-Präfixe</h3>
+    <table>
+      <tr><th>Bundesland</th><th>PLZ-Präfixe</th></tr>
+      <tr><td>Nordrhein-Westfalen</td><td><code>32 33 40–42 44–49 50–53 57–59</code> (34xxx → Hessen; 37xxx bewusst nicht zugeordnet, mehrdeutig mit Niedersachsen/Hessen)</td></tr>
+      <tr><td>Hamburg</td><td><code>20 21 22</code></td></tr>
+      <tr><td>Hessen</td><td><code>34 35 36 60 61 63 64 65</code></td></tr>
+      <tr><td>Berlin</td><td><code>10 12 13 14</code></td></tr>
+      <tr><td>Sachsen</td><td><code>01 02 04 08 09</code></td></tr>
+      <tr><td>Brandenburg</td><td><code>03 15 16</code> (14xxx bewusst nicht zugeordnet, da mehrdeutig mit Berlin)</td></tr>
+      <tr><td>Sachsen-Anhalt</td><td><code>06 39</code></td></tr>
+      <tr><td>Thüringen</td><td><code>07 98 99</code> (36xxx/37xxx bewusst nicht zugeordnet, mehrdeutig mit Hessen/NRW)</td></tr>
+      <tr><td>Rheinland-Pfalz</td><td><code>54 55 56 67</code> (65xxx/76xxx bewusst nicht zugeordnet, mehrdeutig mit Hessen/BW)</td></tr>
+      <tr><td>Baden-Württemberg</td><td><code>68 69 70–75 77–79 88 89</code> (76xxx bewusst nicht zugeordnet, mehrdeutig mit RP)</td></tr>
+      <tr><td>Saarland</td><td><code>66</code></td></tr>
+      <tr><td>Schleswig-Holstein</td><td><code>23 24 25</code> (22xxx bewusst nicht zugeordnet, mehrdeutig mit Hamburg)</td></tr>
+      <tr><td>Mecklenburg-Vorpommern</td><td><code>17 18 19</code></td></tr>
+      <tr><td>Niedersachsen</td><td><code>26 29 30 31 38</code> (21xxx/27xxx/37xxx/49xxx bewusst nicht zugeordnet, mehrdeutig mit Hamburg/Bremen/Hessen/NRW)</td></tr>
+      <tr><td>Bayern</td><td><code>80–87 90–97</code> (63xxx/88xxx/89xxx bewusst nicht zugeordnet, mehrdeutig mit Hessen/Baden-Württemberg)</td></tr>
+      <tr><td>Bremen</td><td>keine (28xxx mehrdeutig mit Niedersachsen) — Erkennung über Bundesland-Feld oder Ort</td></tr>
+    </table>
+    <p>Das Bundesland dient nur als Vorfilter: Findet die Suche den Ort damit nicht, sucht sie ohne
+    Bundesland weiter.</p>
+    <h3>Dateien und Speicherorte</h3>
+    <table>
+      <tr><th>Was</th><th>Wo</th></tr>
+      <tr><td>Geocodierungsdatenbank</td><td><code>&lt;QGIS-Profil&gt;/gis_akademie_geocoder/geocoder.db</code> (Standard) oder der gespeicherte Pfad</td></tr>
+      <tr><td>Vorübergehende Download-Dateien</td><td>Ordner <code>quellen</code> neben der Datenbank; nach erfolgreichem Import gelöscht, nach einem Fehler bis zum nächsten Abruf aufbewahrt</td></tr>
+      <tr><td>Eigene Quellen</td><td><code>&lt;QGIS-Profil&gt;/gis_akademie_geocoder/sources_user.json</code></td></tr>
+      <tr><td>Online geladene Quellenliste</td><td><code>sources_online.json</code> im QGIS-Profil</td></tr>
+    </table>
+  </div>
+
+  <!-- ══ FAQ ══ -->
+  <div class="section" id="faq">
+    <h2>Fehlerbehebung und häufige Fragen</h2>
+
+    <h3>Eine Quelle ist nicht erreichbar oder liefert „eine Webseite statt der Datei“</h3>
+    <p>Meist ist der Server des Landes gerade in Wartung oder überlastet. Der bisherige Bestand des Landes
+    bleibt erhalten, die übrigen Länder werden normal geladen. Versuchen Sie es später erneut — über
+    <em>Alle eingetragenen Quellen aktualisieren</em> oder auf der Detailseite mit <em>Jetzt
+    aktualisieren</em>.</p>
+
+    <h3>Ein Land wird als „übersprungen“ gemeldet</h3>
+    <p>Für dieses Land gilt die <a href="#sperre">Sperre nach Abruf</a>: Der letzte Abruf liegt weniger als
+    28 Tage zurück. Sofort laden: <em>Auch ohne neue Daten erneut laden</em> anhaken.</p>
+
+    <h3>Ein Land wird als „unverändert“ gemeldet</h3>
+    <p>Seit dem letzten Abruf gibt es keine neuen Daten — es wurde nichts geladen. Mit <em>Auch ohne neue
+    Daten erneut laden</em> erzwingen Sie den Abruf, z.&nbsp;B. nach einem Plugin-Update mit geändertem
+    Datenbankformat. Jeder Import ersetzt den bisherigen Bestand seines Landes.</p>
+
+    <h3>Downloads scheitern im Behördennetz (Proxy, Firewall)</h3>
+    <p>Das Plugin lädt direkt von den Servern der Länder (Adressen in der Tabelle
+    <a href="#bundeslaender">Wie und wo die Daten abgerufen werden</a>) und die Quellenliste von GitHub. In
+    abgeschotteten Netzen blockieren Proxy oder Firewall solche Abrufe oft. Möglichkeiten:</p>
+    <ul>
+      <li>die IT bitten, diese Adressen freizugeben,</li>
+      <li>die Datei auf anderem Weg beschaffen und auf der Detailseite als <em>Datei auf diesem Rechner</em>
+        eintragen,</li>
+      <li>eine fertige Datenbank einbinden (siehe <a href="#abo">Geodatenabo Plus</a>).</li>
+    </ul>
+
+    <h3>Zu wenig Speicherplatz</h3>
+    <p>Für alle Länder braucht die fertige Datenbank rund 5–6&nbsp;GB, während des Imports zusätzlich bis
+    ca. 2–3&nbsp;GB (siehe <a href="#aufwand">Aufwand</a>). Abhilfe: nur die benötigten Länder laden oder
+    die Datenbank auf ein größeres Laufwerk legen (<em>Pfad speichern und Datenbank verwenden</em>).
+    Download-Dateien werden nach dem erfolgreichen Import gelöscht; nach einem Fehler bleiben sie im Ordner
+    <code>quellen</code> neben der Datenbank bis zum nächsten Abruf liegen.</p>
+
+    <h3>Wo finde ich technische Details zu einem Fehler?</h3>
+    <p>Das Protokoll im Plugin zeigt Schritte und Ergebnisse in verständlicher Form. Technische Angaben für
+    den Support (Adressen der Dienste, Dateinamen, Fehlerdetails) stehen im QGIS-Meldungsprotokoll:
+    <em>Ansicht → Bedienfelder → Protokollmeldungen</em>, Reiter „GIS-Akademie Geocoder“. Bei einem Fehler
+    weist das Protokoll im Plugin darauf hin.</p>
+
+    <h3>Kann die Datenbank auf einem Netzlaufwerk liegen?</h3>
+    <p>Die Datenbank ist eine einzelne Datei; ihr Pfad kann frei gewählt werden, auch auf einem
+    Netzlaufwerk. Da sie mehrere Gigabyte groß ist, laufen Einrichten und Aktualisieren auf einem lokalen
+    Laufwerk in der Regel schneller. Eine Möglichkeit: lokal einrichten und die fertige Datei anschließend
+    auf das Netzlaufwerk kopieren. Aktualisieren Sie nicht, während andere damit geocodieren.</p>
+
+    <h3>Nominatim ist langsam oder liefert wenig</h3>
+    <p>Nominatim erlaubt höchstens eine Anfrage pro Sekunde (rund 2 Minuten je 100 Adressen) und ist nicht
+    für große Mengen gedacht. Laden Sie die betroffenen Bundesländer in die lokale Datenbank — dann wird
+    Nominatim nur noch als Ersatz gebraucht. Für große Mengen über Nominatim ist eine eigene
+    Nominatim-Instanz nötig.</p>
+
+    <h3>Wie halte ich die Daten aktuell?</h3>
+    <p>Klicken Sie von Zeit zu Zeit (z.&nbsp;B. monatlich) auf <em>Alle eingetragenen Quellen
+    aktualisieren</em>. Geladen wird nur, was neu ist. Das Plugin aktualisiert nie von selbst.</p>
+  </div>
+
+  <!-- ══ POLICY ══ -->
+  <div class="section" id="policy">
+    <h2>Lizenzen, Quellenvermerke und Nutzungsrichtlinien</h2>
+    <h3>Nominatim</h3>
+    <p>Höchstens 1 Anfrage pro Sekunde; das Plugin hält dies automatisch ein (1,1 Sekunden Pause). Für
+    größere Mengen eine eigene Instanz betreiben. Weitere Infos:
+    <a href="https://operations.osmfoundation.org/policies/nominatim/" target="_blank">operations.osmfoundation.org/policies/nominatim/</a></p>
+    <h3>Lokale Daten</h3>
+    <p>Die amtlichen Hauskoordinaten stehen überwiegend unter der <strong>Datenlizenz Deutschland –
+    Namensnennung – Version 2.0 (dl-de/by-2-0)</strong>; Niedersachsen, Schleswig-Holstein, Thüringen und
+    Bremen nutzen <strong>CC BY 4.0</strong>, Berlin <strong>dl-de/zero-2-0</strong> (keine Namensnennung
+    erforderlich). Bitte geben Sie bei Karten und weitergegebenen Ergebnissen die Namensnennung laut
+    Quellenvermerk an.</p>
+    <div class="warn"><strong>Ausnahme Bayern und PLZ-Gebiete:</strong> Diese Daten stammen aus
+    OpenStreetMap und stehen unter der <strong>ODbL</strong>. Neben der Namensnennung
+    (© OpenStreetMap-Mitwirkende) gilt hier <strong>Share-alike</strong>: Eine daraus abgeleitete,
+    weitergegebene Datenbank muss wieder unter der ODbL stehen.</div>
+    <h3>Quellenvermerke je Bundesland</h3>
+    <!-- TABELLE:vermerke -->
+    <table>
+      <tr><th>Bundesland</th><th>Quellenvermerk</th></tr>
+      <tr><td>Baden-Württemberg</td><td>Datengrundlage: LGL, www.lgl-bw.de, dl-de/by-2-0</td></tr>
+      <tr><td>Bayern</td><td>© OpenStreetMap-Mitwirkende, ODbL (nicht amtlich; Share-alike beachten)</td></tr>
+      <tr><td>Berlin</td><td>© GeoBasis-DE/SenStadt Berlin, dl-de/zero-2-0 (Namensnennung optional)</td></tr>
+      <tr><td>Brandenburg</td><td>© GeoBasis-DE/LGB, dl-de/by-2-0</td></tr>
+      <tr><td>Bremen</td><td>© Landesamt GeoInformation Bremen, CC BY 4.0</td></tr>
+      <tr><td>Hamburg</td><td>© Freie und Hansestadt Hamburg, Landesbetrieb Geoinformation und Vermessung, dl-de/by-2-0</td></tr>
+      <tr><td>Hessen</td><td>© Hessische Verwaltung für Bodenmanagement und Geoinformation (HVBG), dl-de/by-2-0</td></tr>
+      <tr><td>Mecklenburg-Vorpommern</td><td>© GeoBasis-DE/M-V, dl-de/by-2-0</td></tr>
+      <tr><td>Niedersachsen</td><td>© GeoBasis-DE/LGLN &lt;Jahr&gt;, Daten geändert, CC BY 4.0</td></tr>
+      <tr><td>Nordrhein-Westfalen</td><td>© Geobasis NRW, dl-de/by-2-0</td></tr>
+      <tr><td>Rheinland-Pfalz</td><td>© GeoBasis-DE/LVermGeoRP &lt;Jahr&gt;, dl-de/by-2-0, www.lvermgeo.rlp.de</td></tr>
+      <tr><td>Saarland</td><td>© GeoBasis DE/LVGL-SL &lt;Jahr&gt;, dl-de/by-2-0</td></tr>
+      <tr><td>Sachsen</td><td>© GeoSN, dl-de/by-2-0</td></tr>
+      <tr><td>Sachsen-Anhalt</td><td>© GeoBasis-DE/LVermGeo ST, dl-de/by-2-0</td></tr>
+      <tr><td>Schleswig-Holstein</td><td>© GeoBasis-DE/LVermGeo SH/CC BY 4.0</td></tr>
+      <tr><td>Thüringen</td><td>© GDI-Th, CC BY 4.0</td></tr>
+      <tr><td>PLZ-Gebiete (mitgeliefert)</td><td>© OpenStreetMap-Mitwirkende, ODbL 1.0</td></tr>
+    </table>
+    <!-- /TABELLE:vermerke -->
+    <h3>Quellen und Lizenzen</h3>
+    <!-- TABELLE:quellen -->
+    <table>
+      <tr><th>Bundesland</th><th>Quelle</th><th>Lizenz</th></tr>
+      <tr><td>Baden-Württemberg</td><td><a href="https://opengeodata.lgl-bw.de/data/hk/hk_bw.zip" target="_blank">LGL BW – Hauskoordinaten (opengeodata.lgl-bw.de)</a></td><td>dl-de/by-2-0</td></tr>
+      <tr><td>Bayern</td><td><a href="https://download.geofabrik.de/europe/germany/bayern-latest.osm.pbf" target="_blank">OpenStreetMap – Geofabrik-Extrakt Bayern</a></td><td>ODbL 1.0 (© OpenStreetMap-Mitwirkende)</td></tr>
+      <tr><td>Berlin</td><td><a href="https://gdi.berlin.de/data/adressen_berlin/atom/0.atom" target="_blank">Geoportal Berlin – Hauskoordinaten (gdi.berlin.de)</a></td><td>dl-de/zero-2-0</td></tr>
+      <tr><td>Brandenburg</td><td><a href="https://inspire.brandenburg.de/services/ad_alkis_wfs" target="_blank">LGB – INSPIRE-Adressen Brandenburg (WFS)</a></td><td>dl-de/by-2-0 (© GeoBasis-DE/LGB)</td></tr>
+      <tr><td>Bremen</td><td><a href="https://gdi2.geo.bremen.de/inspire/download/ALKIS_Gebaeudeadressen/data/GEBAEUDEADRESSEN_SHP_FHB.zip" target="_blank">Landesamt GeoInformation Bremen – ALKIS Gebäudeadressen (gdi2.geo.bremen.de)</a></td><td>CC BY 4.0</td></tr>
+      <tr><td>Hamburg</td><td><a href="https://geodienste.hamburg.de/HH_WFS_INSPIRE_Adressen" target="_blank">LGV Hamburg – Adressen Hauskoordinaten (geodienste.hamburg.de)</a></td><td>dl-de/by-2-0</td></tr>
+      <tr><td>Hessen</td><td><a href="https://gds.hessen.de/downloadcenter/{datum}/Liegenschaftskataster/Hauskoordinaten%20ohne%20Postalische%20Angaben%20(txt)/Hauskoordinaten%20ohne%20Postalische%20Angaben-{jahr}-{nr}.zip" target="_blank">HVBG – Hauskoordinaten Hessen (gds.hessen.de)</a></td><td>dl-de/by-2-0</td></tr>
+      <tr><td>Mecklenburg-Vorpommern</td><td><a href="https://www.geodaten-mv.de/dienste/inspire_ad_alkis_download" target="_blank">LAiV M-V – Adressen (geodaten-mv.de)</a></td><td>dl-de/by-2-0</td></tr>
+      <tr><td>Niedersachsen</td><td><a href="https://arcgis-geojson.s3.eu-de.cloud-object-storage.appdomain.cloud/alkis-vektor/lgln-opengeodata-alkis-vektor.geojson" target="_blank">LGLN – ALKIS-Vektordaten je Kreis (OpenGeoData Niedersachsen)</a></td><td>CC BY 4.0 (© GeoBasis-DE/LGLN)</td></tr>
+      <tr><td>Nordrhein-Westfalen</td><td><a href="https://www.opengeodata.nrw.de/produkte/geobasis/lk/akt/gebref_txt/index.json" target="_blank">Geobasis NRW – Gebäudereferenzen (opengeodata.nrw.de)</a></td><td>dl-de/by-2-0</td></tr>
+      <tr><td>Rheinland-Pfalz</td><td><a href="https://geobasis-rlp.de/data/hk/current/zip/HAUSKOORDINATEN_RP.zip" target="_blank">LVermGeo RLP – Hauskoordinaten (geobasis-rlp.de)</a></td><td>dl-de/by-2-0</td></tr>
+      <tr><td>Saarland</td><td><a href="https://geoportal.saarland.de/spatial-objects/416/collections/GDI_ALKIS_Gebaeude:Hauskoordinaten/items" target="_blank">LVGL – Hauskoordinaten Saarland (OGC API Features)</a></td><td>dl-de/by-2-0 (© GeoBasis DE/LVGL-SL)</td></tr>
+      <tr><td>Sachsen</td><td><a href="https://www.geodaten.sachsen.de/downloadbereich-hauskoordinaten-4172.html" target="_blank">GeoSN – Hauskoordinaten Sachsen (geodaten.sachsen.de)</a></td><td>dl-de/by-2-0</td></tr>
+      <tr><td>Sachsen-Anhalt</td><td><a href="https://geodatenportal.sachsen-anhalt.de/gfds/datei/anzeigen/id/258997,501/gebaeudereferenzen.zip" target="_blank">LVermGeo ST – Gebäudereferenzen (geodatenportal.sachsen-anhalt.de)</a></td><td>dl-de/by-2-0 (© GeoBasis-DE/LVermGeo ST)</td></tr>
+      <tr><td>Schleswig-Holstein</td><td><a href="https://geodaten.schleswig-holstein.de/gaialight-sh/_apps/dladownload" target="_blank">LVermGeo SH – Hauskoordinaten aus ALKIS (geodaten.schleswig-holstein.de)</a></td><td>CC BY 4.0 (© GeoBasis-DE/LVermGeo SH)</td></tr>
+      <tr><td>Thüringen</td><td><a href="https://geoportal.geoportal-th.de/hausko_umr/HK-TH.zip" target="_blank">TLBG – Hauskoordinaten Thüringen (geoportal-th.de)</a></td><td>CC BY 4.0 (© GDI-Th)</td></tr>
+    </table>
+    <!-- /TABELLE:quellen -->
+  </div>
+
+</div>
+
+<script>
+  const links = document.querySelectorAll('.sidebar a');
+  const sections = document.querySelectorAll('.section');
+  window.addEventListener('scroll', () => {
+    let current = '';
+    sections.forEach(s => { if (window.scrollY >= s.offsetTop - 60) current = s.id; });
+    links.forEach(a => a.classList.toggle('active', a.getAttribute('href') === '#' + current));
+  });
+</script>
+</body>
+</html>

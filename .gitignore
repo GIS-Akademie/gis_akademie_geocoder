@@ -1,0 +1,29 @@
+# Geocodierungsdatenbank (mehrere GB) und andere Datenbestände – nie ins Repo
+material/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite
+*.gpkg
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+
+# Plugin-Pakete / Build-Artefakte
+*.zip
+build/
+dist/
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+Thumbs.db
+.DS_Store

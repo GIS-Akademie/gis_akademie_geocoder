@@ -1,0 +1,30 @@
+[general]
+name=GIS-Akademie Geocoder
+version=1.0
+qgisMinimumVersion=3.16
+qgisMaximumVersion=4.99
+description=Geocodes German addresses from CSV, Excel, OpenDocument (.ods) or tab-separated files against a local database of official house coordinates for all 16 German states, with Nominatim as an optional fallback. Can run fully offline (GDPR mode).
+author=GIS-Akademie
+email=wieschmann@gis-akademie.de
+about=Geocodes address tables (CSV, Excel .xlsx/.xls, OpenDocument .ods, tab-separated) and writes the result as a GeoPackage layer. Addresses are matched against a local SQLite database of official German house coordinates (Hauskoordinaten) with fuzzy search; addresses without a local match can optionally be sent to Nominatim (OpenStreetMap). In GDPR mode no address ever leaves the computer.
+
+  The local database is built inside the plugin: one click downloads the official open data of all 16 German states and imports it — only when there is new data. The plugin handles the states' different services (fixed downloads, feeds, INSPIRE WFS, OGC API Features, per-district ALKIS GeoPackages, job-based download clients). Bavaria is loaded from an OpenStreetMap extract (Geofabrik) because official addresses are not free there. Users can also register their own files (HK-DE text, INSPIRE GML, shapefile or OpenStreetMap extract) per state. The list of sources can be updated online from this repository without a new plugin version.
+
+  Missing postcodes are added automatically from the bundled postcode areas (derived directly from OpenStreetMap, © OpenStreetMap contributors, ODbL).
+
+  Requirements: none beyond QGIS (uses GDAL/OGR from QGIS). Region: Germany only. The user interface and documentation are in German.
+
+  Data licences: official house coordinates mostly dl-de/by-2-0 (Berlin dl-de/zero-2-0, Bremen CC BY 4.0); OpenStreetMap data and the bundled postcode areas ODbL 1.0. Please follow the attribution rules of each source (see the built-in help).
+
+  Deutsch: Geocodiert Adresstabellen gegen amtliche Hauskoordinaten aller 16 Bundesländer (lokal, optional DSGVO-konform ohne Online-Abfrage), lädt und aktualisiert die Open-Data-Quellen der Länder selbst und ergänzt fehlende Postleitzahlen aus mitgelieferten PLZ-Gebieten.
+tags=geocoding, address, germany, nominatim, openstreetmap, csv, excel, geopackage, offline, gdpr, hauskoordinaten, hk-de, inspire, postcode, qgis4
+homepage=https://github.com/GIS-Akademie/gis_akademie_geocoder#readme
+repository=https://github.com/GIS-Akademie/gis_akademie_geocoder
+tracker=https://github.com/GIS-Akademie/gis_akademie_geocoder/issues
+license=GPL-2.0-or-later
+category=Vector
+icon=icons/icon.png
+experimental=False
+deprecated=False
+changelog=
+  1.0 - Erste Veröffentlichung im QGIS-Plugin-Verzeichnis. Geocodiert Adresstabellen (CSV, Excel, OpenDocument, Tab-getrennt) gegen eine lokale Datenbank amtlicher Hauskoordinaten aller 16 Bundesländer, optional mit Nominatim als Ausweichsuche oder vollständig offline (DSGVO-Modus). Die Datenbank wird im Plugin eingerichtet und aktualisiert: Ein Klick lädt die offenen Daten der Länder und importiert nur, was sich geändert hat; die Quellenliste lässt sich online aktualisieren. Fehlende Postleitzahlen werden aus den mitgelieferten PLZ-Gebieten (OpenStreetMap) ergänzt.

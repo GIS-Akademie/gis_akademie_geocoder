@@ -1,0 +1,348 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ui version="4.0">
+ <class>GISAkademieGeocoderDialogBase</class>
+ <widget class="QDialog" name="GISAkademieGeocoderDialogBase">
+  <property name="geometry">
+   <rect><x>0</x><y>0</y><width>640</width><height>740</height></rect>
+  </property>
+  <property name="minimumSize">
+   <size><width>580</width><height>460</height></size>
+  </property>
+  <property name="windowTitle"><string>GIS-Akademie Geocoder</string></property>
+
+  <layout class="QVBoxLayout" name="root_layout">
+   <property name="spacing"><number>0</number></property>
+<item>
+    <widget class="QTabWidget" name="tab_widget">
+
+     <!-- ══════════════════ TAB: GEOCODIERUNG ══════════════════ -->
+     <widget class="QWidget" name="tab_geocode">
+      <attribute name="title"><string>Geocodierung</string></attribute>
+      <layout class="QVBoxLayout" name="layout_geocode_outer">
+       <property name="margin"><number>0</number></property>
+       <item>
+        <widget class="QScrollArea" name="geocode_scroll">
+         <property name="widgetResizable"><bool>true</bool></property>
+         <property name="frameShape"><enum>QFrame::NoFrame</enum></property>
+         <widget class="QWidget" name="geocode_scroll_content">
+          <layout class="QVBoxLayout" name="layout_geocode">
+           <property name="spacing"><number>8</number></property>
+<!-- 1. Eingabedatei -->
+       <item>
+        <widget class="QGroupBox" name="grp_input">
+         <property name="title"><string>1 · Eingabedatei</string></property>
+         <layout class="QGridLayout" name="layout_input">
+          <item row="0" column="0">
+           <widget class="QLabel"><property name="text"><string>Datei</string></property></widget>
+          </item>
+          <item row="0" column="1">
+           <widget class="QLineEdit" name="le_csv">
+            <property name="placeholderText"><string>CSV, Excel (.xlsx/.xls), OpenDocument (.ods) oder Tab-getrennte Textdatei …</string></property>
+           </widget>
+          </item>
+          <item row="0" column="2">
+           <widget class="QPushButton" name="btn_csv">
+            <property name="text"><string>Durchsuchen …</string></property>
+            <property name="maximumWidth"><number>110</number></property>
+           </widget>
+          </item>
+          <item row="1" column="0" colspan="3">
+           <widget class="QLabel" name="lbl_filetype">
+            <property name="text"><string>Erkannter Dateityp: –</string></property>
+            <property name="styleSheet"><string>color: gray; font-size: 10px;</string></property>
+           </widget>
+          </item>
+          <item row="2" column="0" colspan="3">
+           <widget class="QLabel" name="lbl_preview">
+            <property name="text"><string>Vorschau: lade erst eine Datei.</string></property>
+            <property name="wordWrap"><bool>true</bool></property>
+            <property name="styleSheet"><string>font-style: italic; color: gray;</string></property>
+           </widget>
+          </item>
+         </layout>
+        </widget>
+       </item>
+
+       <!-- 2. Spaltenzuordnung -->
+       <item>
+        <widget class="QGroupBox" name="grp_mapping">
+         <property name="title"><string>2 · Spaltenzuordnung</string></property>
+         <layout class="QVBoxLayout" name="layout_mapping">
+          <item>
+           <widget class="QTabWidget" name="tabs_mapping">
+            <property name="currentIndex"><number>0</number></property>
+            <widget class="QWidget" name="tab_multi">
+             <attribute name="title"><string>Mehrere Spalten</string></attribute>
+             <layout class="QGridLayout" name="layout_multi">
+              <property name="verticalSpacing"><number>6</number></property>
+              <item row="0" column="0">
+               <widget class="QLabel" name="lbl_strasse">
+                <property name="text"><string>Straße (+ Hausnummer) *</string></property>
+                <property name="toolTip"><string>Straßenname. Steht die Hausnummer mit in dieser Spalte („Lindenstraße 12“), wird sie automatisch abgetrennt – außer es ist zusätzlich eine eigene Hausnummer-Spalte zugeordnet.</string></property>
+               </widget>
+              </item>
+              <item row="0" column="1"><widget class="QComboBox" name="cb_strasse"><property name="enabled"><bool>false</bool></property></widget></item>
+              <item row="1" column="0">
+               <widget class="QLabel" name="lbl_hausnummer">
+                <property name="text"><string>Hausnummer (eigene Spalte)</string></property>
+                <property name="toolTip"><string>Optional: separate Hausnummer-Spalte. Empfohlen bei nummerierten Straßennamen („Straße 10“, „An der B 5“), damit die Zahl im Namen nicht als Hausnummer gelesen wird. Bereiche wie „12-14“ werden auf die erste Nummer gesetzt.</string></property>
+               </widget>
+              </item>
+              <item row="1" column="1"><widget class="QComboBox" name="cb_hausnummer"><property name="enabled"><bool>false</bool></property></widget></item>
+              <item row="2" column="0"><widget class="QLabel" name="lbl_plz"><property name="text"><string>Postleitzahl</string></property></widget></item>
+              <item row="2" column="1"><widget class="QComboBox" name="cb_plz"><property name="enabled"><bool>false</bool></property></widget></item>
+              <item row="3" column="0">
+               <widget class="QLabel" name="lbl_stadt">
+                <property name="text"><string>Stadt / Ort *</string></property>
+                <property name="toolTip"><string>Gemeinde, Ortsteil oder Bezirk („Blankenese“, „Pankow“, „Berlin-Mitte“). Gleichnamige Orte werden über PLZ/Bundesland unterschieden, sonst gilt der größte.</string></property>
+               </widget>
+              </item>
+              <item row="3" column="1"><widget class="QComboBox" name="cb_stadt"><property name="enabled"><bool>false</bool></property></widget></item>
+              <item row="4" column="0">
+               <widget class="QLabel" name="lbl_land">
+                <property name="text"><string>Bundesland</string></property>
+                <property name="toolTip"><string>Optionales Bundesland (z. B. "Nordrhein-Westfalen", "NRW", "Hamburg"). Generische Angaben wie "Deutschland" werden ignoriert.</string></property>
+               </widget>
+              </item>
+              <item row="4" column="1"><widget class="QComboBox" name="cb_land"><property name="enabled"><bool>false</bool></property></widget></item>
+              <item row="5" column="0" colspan="2">
+               <widget class="QLabel" name="lbl_hint_multi">
+                <property name="text"><string>* Pflichtfelder  ·  Hausnummer, PLZ und Bundesland sind optional. Bundesland: z. B. "Nordrhein-Westfalen" oder "NRW" – nicht "Deutschland".</string></property>
+                <property name="styleSheet"><string>color: gray; font-size: 10px;</string></property>
+                <property name="wordWrap"><bool>true</bool></property>
+               </widget>
+              </item>
+             </layout>
+            </widget>
+            <widget class="QWidget" name="tab_single">
+             <attribute name="title"><string>Eine Spalte</string></attribute>
+             <layout class="QGridLayout" name="layout_single">
+              <property name="verticalSpacing"><number>6</number></property>
+              <item row="0" column="0" colspan="2">
+               <widget class="QLabel" name="lbl_hint_single">
+                <property name="text"><string>Die komplette Adresse steht in einer Spalte (z. B. „Lorettoplatz 7, 81377 München"). Straße, PLZ und Ort werden automatisch erkannt — mit oder ohne Komma.</string></property>
+                <property name="styleSheet"><string>color: gray; font-size: 10px;</string></property>
+                <property name="wordWrap"><bool>true</bool></property>
+               </widget>
+              </item>
+              <item row="1" column="0">
+               <widget class="QLabel" name="lbl_address">
+                <property name="text"><string>Adressspalte *</string></property>
+                <property name="toolTip"><string>Spalte mit der vollständigen Adresse in einer Zeile.</string></property>
+               </widget>
+              </item>
+              <item row="1" column="1"><widget class="QComboBox" name="cb_address"><property name="enabled"><bool>false</bool></property></widget></item>
+              <item row="2" column="0" colspan="2"><spacer name="spacer_single"><property name="orientation"><enum>Qt::Vertical</enum></property><property name="sizeHint"><size><width>0</width><height>0</height></size></property></spacer></item>
+             </layout>
+            </widget>
+           </widget>
+          </item>
+         </layout>
+        </widget>
+       </item>
+
+       <!-- 3. Ausgabe -->
+       <item>
+        <widget class="QGroupBox" name="grp_output">
+         <property name="title"><string>3 · Ausgabe</string></property>
+         <layout class="QGridLayout" name="layout_output">
+          <property name="verticalSpacing"><number>6</number></property>
+          <item row="0" column="0"><widget class="QLabel"><property name="text"><string>GeoPackage</string></property></widget></item>
+          <item row="0" column="1">
+           <widget class="QLineEdit" name="le_gpkg">
+            <property name="placeholderText"><string>Pfad zur .gpkg-Datei (neu oder vorhanden) …</string></property>
+           </widget>
+          </item>
+          <item row="0" column="2">
+           <widget class="QPushButton" name="btn_gpkg">
+            <property name="text"><string>Durchsuchen …</string></property>
+            <property name="maximumWidth"><number>110</number></property>
+           </widget>
+          </item>
+          <item row="1" column="0"><widget class="QLabel"><property name="text"><string>Layer-Name</string></property></widget></item>
+          <item row="1" column="1" colspan="2">
+           <widget class="QLineEdit" name="le_layer_name">
+            <property name="placeholderText"><string>z. B. geocodierte_adressen</string></property>
+           </widget>
+          </item>
+          <item row="2" column="0" colspan="3">
+           <widget class="QLabel">
+            <property name="text"><string>Existiert die Datei bereits, wird der Layer hinzugefügt (bestehende Layer bleiben erhalten).</string></property>
+            <property name="wordWrap"><bool>true</bool></property>
+            <property name="styleSheet"><string>color: gray; font-size: 10px;</string></property>
+           </widget>
+          </item>
+          <item row="3" column="0" colspan="3">
+           <widget class="QCheckBox" name="cb_load">
+            <property name="text"><string>Layer nach Geocodierung in QGIS laden</string></property>
+            <property name="checked"><bool>true</bool></property>
+           </widget>
+          </item>
+          <item row="4" column="0" colspan="3">
+           <widget class="QCheckBox" name="cb_split_unfound">
+            <property name="text"><string>Nicht gefundene Adressen aussortieren und als CSV ablegen</string></property>
+            <property name="toolTip"><string>Wenn aktiviert, enthält der Ergebnis-Layer nur erfolgreich geocodierte Adressen (keine Zeilen mit leerer Geometrie). Die nicht gefundenen Adressen werden automatisch als CSV im selben Verzeichnis wie das GeoPackage abgelegt — Dateiname: &lt;Layer-Name&gt;_nicht_gefunden.csv.</string></property>
+            <property name="checked"><bool>false</bool></property>
+           </widget>
+          </item>
+          <item row="5" column="0" colspan="3">
+           <widget class="QCheckBox" name="cb_offset">
+            <property name="text"><string>Punkte mit identischen Koordinaten um 1 m versetzen</string></property>
+            <property name="checked"><bool>false</bool></property>
+           </widget>
+          </item>
+          <item row="6" column="0" colspan="3">
+           <widget class="QCheckBox" name="cb_local_only">
+            <property name="text"><string>DSGVO-konformes Geocodieren (nur lokale Quellen, keine Online-Abfrage)</string></property>
+            <property name="toolTip"><string>Wenn aktiviert, werden ausschließlich die lokale Geocodierungsdatenbank genutzt. Es wird KEINE Online-Abfrage (Nominatim/OpenStreetMap) durchgeführt — keine Adresse verlässt den Rechner. Adressen ohne lokalen Treffer bleiben „nicht gefunden".</string></property>
+            <property name="checked"><bool>false</bool></property>
+            <property name="styleSheet"><string>font-weight: bold;</string></property>
+           </widget>
+          </item>
+         </layout>
+        </widget>
+       </item>
+
+       <!-- 4. Fortschritt -->
+       <item>
+        <widget class="QGroupBox" name="grp_progress">
+         <property name="title"><string>Fortschritt</string></property>
+         <layout class="QVBoxLayout" name="layout_progress">
+          <property name="spacing"><number>4</number></property>
+          <item><widget class="QProgressBar" name="progress_bar"><property name="value"><number>0</number></property></widget></item>
+          <item><widget class="QLabel" name="lbl_progress"><property name="text"><string>Bereit.</string></property></widget></item>
+          <item>
+           <widget class="QTextEdit" name="log">
+            <property name="readOnly"><bool>true</bool></property>
+            <property name="maximumHeight"><number>110</number></property>
+            <property name="font"><font><family>Courier New</family><pointsize>9</pointsize></font></property>
+           </widget>
+          </item>
+         </layout>
+        </widget>
+       </item>
+
+          </layout>
+         </widget>
+        </widget>
+       </item>
+
+       <!-- Buttons Geocodierung (fest unten, außerhalb des Scrollbereichs) -->
+       <item>
+        <layout class="QHBoxLayout" name="layout_buttons">
+         <property name="leftMargin"><number>9</number></property>
+         <property name="topMargin"><number>8</number></property>
+         <property name="rightMargin"><number>9</number></property>
+         <property name="bottomMargin"><number>10</number></property>
+         <item><spacer name="sp1"><property name="orientation"><enum>Qt::Horizontal</enum></property><property name="sizeHint" stdset="0"><size><width>40</width><height>20</height></size></property></spacer></item>
+         <item><widget class="QPushButton" name="btn_help"><property name="text"><string>Hilfe</string></property></widget></item>
+         <item><widget class="QPushButton" name="btn_stop"><property name="text"><string>Abbrechen</string></property><property name="enabled"><bool>false</bool></property></widget></item>
+         <item><widget class="QPushButton" name="btn_run"><property name="text"><string>Geocodierung starten</string></property></widget></item>
+        </layout>
+       </item>
+      </layout>
+     </widget>
+
+     <!-- ══════════════════ TAB: ADMIN ══════════════════ -->
+     <widget class="QWidget" name="tab_admin">
+      <attribute name="title"><string>Datenbank &amp;&amp; Quellen</string></attribute>
+      <layout class="QVBoxLayout" name="layout_admin_outer">
+       <property name="margin"><number>0</number></property>
+       <item>
+        <widget class="QScrollArea" name="admin_scroll">
+         <property name="widgetResizable"><bool>true</bool></property>
+         <property name="frameShape"><enum>QFrame::NoFrame</enum></property>
+         <widget class="QWidget" name="admin_scroll_content">
+          <layout class="QVBoxLayout" name="layout_admin">
+           <property name="spacing"><number>8</number></property>
+       <!-- Datenbank-Pfad -->
+       <item>
+        <widget class="QGroupBox" name="grp_db_path">
+         <property name="title"><string>Geocodierungsdatenbank</string></property>
+         <layout class="QGridLayout" name="layout_db_path">
+          <property name="verticalSpacing"><number>6</number></property>
+          <item row="0" column="0">
+           <widget class="QLabel">
+            <property name="text"><string>Pfad zur Datenbankdatei (.db)</string></property>
+           </widget>
+          </item>
+          <item row="0" column="1">
+           <widget class="QLineEdit" name="le_db_path">
+            <property name="placeholderText"><string>Pfad zur geocoder.db …</string></property>
+           </widget>
+          </item>
+          <item row="0" column="2">
+           <widget class="QPushButton" name="btn_db_browse">
+            <property name="text"><string>Durchsuchen …</string></property>
+            <property name="maximumWidth"><number>110</number></property>
+           </widget>
+          </item>
+          <item row="1" column="1" colspan="2">
+           <widget class="QPushButton" name="btn_db_save">
+            <property name="text"><string>Pfad speichern und Datenbank verwenden</string></property>
+           </widget>
+          </item>
+          <item row="2" column="0" colspan="3">
+           <widget class="QLabel" name="lbl_db_path_info">
+            <property name="text"><string></string></property>
+            <property name="wordWrap"><bool>true</bool></property>
+            <property name="styleSheet"><string>color: gray; font-size: 11px;</string></property>
+           </widget>
+          </item>
+          <item row="3" column="0" colspan="3">
+           <widget class="QLabel" name="lbl_db_status">
+            <property name="text"><string>Keine lokale Datenbank vorhanden.</string></property>
+            <property name="wordWrap"><bool>true</bool></property>
+            <property name="textFormat"><enum>Qt::RichText</enum></property>
+           </widget>
+          </item>
+         </layout>
+        </widget>
+       </item>
+
+       <!-- Import-Fortschritt -->
+       <item>
+        <widget class="QGroupBox" name="grp_import_progress">
+         <property name="title"><string>Fortschritt</string></property>
+         <layout class="QVBoxLayout" name="layout_import_progress">
+          <property name="spacing"><number>4</number></property>
+          <item><widget class="QProgressBar" name="import_progress_bar"><property name="value"><number>0</number></property></widget></item>
+          <item><widget class="QLabel" name="lbl_import_progress"><property name="text"><string>Bereit.</string></property></widget></item>
+          <item>
+           <widget class="QTextEdit" name="import_log">
+            <property name="readOnly"><bool>true</bool></property>
+            <property name="maximumHeight"><number>100</number></property>
+            <property name="font"><font><family>Courier New</family><pointsize>9</pointsize></font></property>
+           </widget>
+          </item>
+         </layout>
+        </widget>
+       </item>
+
+          </layout>
+         </widget>
+        </widget>
+       </item>
+
+       <!-- Buttons Admin (fest unten, außerhalb des Scrollbereichs) -->
+       <item>
+        <layout class="QHBoxLayout" name="layout_admin_buttons">
+         <property name="leftMargin"><number>9</number></property>
+         <property name="topMargin"><number>8</number></property>
+         <property name="rightMargin"><number>9</number></property>
+         <property name="bottomMargin"><number>10</number></property>
+         <item><spacer name="sp2"><property name="orientation"><enum>Qt::Horizontal</enum></property><property name="sizeHint" stdset="0"><size><width>40</width><height>20</height></size></property></spacer></item>
+         <item><widget class="QPushButton" name="btn_help_admin"><property name="text"><string>Hilfe</string></property></widget></item>
+         <item><widget class="QPushButton" name="btn_import_stop"><property name="text"><string>Abbrechen</string></property><property name="enabled"><bool>false</bool></property></widget></item>
+        </layout>
+       </item>
+      </layout>
+     </widget>
+
+    </widget>
+   </item>
+  </layout>
+ </widget>
+ <resources/>
+ <connections/>
+</ui>

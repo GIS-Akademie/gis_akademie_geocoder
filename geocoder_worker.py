@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 
 import time
+import traceback
+import urllib.error
 import urllib.request
 import urllib.parse
 import json
@@ -10,11 +12,12 @@ from qgis.PyQt.QtCore import QObject, pyqtSignal
 
 import os
 
-from .local_geocoder import (search as local_search, db_exists, normalize,
+from .local_geocoder import (search as local_search, db_state, normalize,
                              get_db_stats, diagnose_search, locate_locality,
                              street_representative, bundesland_from_plz,
                              canonical_bundesland, GENERIC_COUNTRY_NAMES,
-                             ensure_lookup_tables, normalize_hausnummer)
+                             ensure_lookup_tables, normalize_hausnummer,
+                             normalize_plz, get_connection, _is_locked_error)
 
 
 def _plugin_version():
@@ -96,7 +99,11 @@ CATEGORY_TYPE_MAP = {
 }
 
 
-def calc_accuracy_nominatim(addresstype, type_, category, importance):
+def calc_accuracy_nominatim(addresstype, type_, category, importance=None):
+    """Accuracy level/label from the Nominatim result type. 'importance'
+    (popularity of the object) says nothing about the positional accuracy
+    and is deliberately ignored — it used to lift a well-known street to
+    house-number level (5) and a city to Ortsteil level (3)."""
     if addresstype in ACCURACY_MAP:
         level, label = ACCURACY_MAP[addresstype]
     elif (category, type_) in CATEGORY_TYPE_MAP:
@@ -105,9 +112,18 @@ def calc_accuracy_nominatim(addresstype, type_, category, importance):
         level, label = CATEGORY_TYPE_MAP[(category, None)]
     else:
         level, label = 0, 'Unbekannt'
-    if importance is not None and float(importance) > 0.5 and level > 0:
-        level = min(level + 1, 5)
     return level, label
+
+
+# Waiting times (seconds) after HTTP 429 'Too Many Requests' from Nominatim
+# before the request is repeated; a Retry-After header takes precedence.
+NOMINATIM_RETRY_DELAYS = (5, 15, 45)
+NOMINATIM_MAX_DELAY    = 10.0     # upper bound for the raised request interval
+
+LOCKED_MESSAGE = ('Die lokale Datenbank ist gesperrt – vermutlich läuft gerade ein '
+                  'Datenbank-Import. Die Geocodierung wurde angehalten; die bisherigen '
+                  'Ergebnisse ({n} von {total}) bleiben erhalten. Bitte nach Ende des '
+                  'Imports erneut starten.')
 
 
 # The PLZ-prefix→Bundesland table lives centrally in local_geocoder
@@ -219,6 +235,10 @@ class GeocoderWorker(QObject):
     progress     = pyqtSignal(int, int, str)
     result_ready = pyqtSignal(list)
     finished     = pyqtSignal()
+    # Technical details (exception texts, tracebacks) for a technical log.
+    # Optional: user-relevant messages (e.g. database locked) are ALSO sent
+    # as progress text so they show up in the geocoding log.
+    detail       = pyqtSignal(str)
 
     def __init__(self, rows, col_map, delay=1.1, local_only=False,
                  bundeslaender=None):
@@ -228,21 +248,72 @@ class GeocoderWorker(QObject):
         self.delay             = delay
         self.local_only        = local_only
         self._cancelled        = False
-        self._has_local        = db_exists()
+        # Whether a usable local DB exists is determined in run() (worker
+        # thread): the check may wait for the lock of a running import.
+        self._has_local        = False
         # List of imported Bundesländer. The dialog passes its cached
         # statistics; if missing, they are determined only in run() — i.e. in
         # the worker thread. The constructor runs in the UI thread, where a
         # GROUP BY over millions of rows would freeze QGIS for seconds.
         self._db_bundeslaender = list(bundeslaender) if bundeslaender else None
         self._local_diagnose   = ''
+        self._conn             = None   # one DB connection per run (B42)
+        self.abort_reason      = ''     # German text if the run stopped early
 
     def cancel(self):
         self._cancelled = True
 
+    def _emit_detail(self, text):
+        try:
+            self.detail.emit(text)
+        except Exception:
+            pass
+
     def run(self):
-        results        = []
-        total          = len(self.rows)
-        last_nominatim = 0.0
+        """Geocode all rows. Always ends with result_ready (the results so
+        far) and finished — also after an error or a locked database, so the
+        dialog never stays in the 'running' state."""
+        results = []
+        total   = len(self.rows)
+        try:
+            if self._prepare_local(total):
+                self._geocode_rows(results, total)
+        except Exception as e:
+            if _is_locked_error(e):
+                self.abort_reason = LOCKED_MESSAGE.format(n=len(results), total=total)
+            else:
+                self.abort_reason = ('Die Geocodierung wurde wegen eines unerwarteten '
+                                     f'Fehlers abgebrochen ({type(e).__name__}); die '
+                                     f'bisherigen Ergebnisse ({len(results)} von {total}) '
+                                     'bleiben erhalten.')
+            self._emit_detail('Geocodierung abgebrochen:\n' + traceback.format_exc())
+            try:
+                self.progress.emit(len(results), total, self.abort_reason)
+            except Exception:
+                pass
+        finally:
+            if self._conn is not None:
+                try:
+                    self._conn.close()
+                except Exception:
+                    pass
+                self._conn = None
+            self.result_ready.emit(results)
+            self.finished.emit()
+
+    def _prepare_local(self, total):
+        """Check the local DB once per run and open the shared connection.
+        Returns False if the run cannot start (database locked)."""
+        state = db_state()
+        if state == 'locked':
+            # An import commit holds the lock only briefly — wait longer once.
+            self.progress.emit(0, total, 'Lokale Datenbank ist gesperrt – warte …')
+            state = db_state(timeout=30.0)
+        if state == 'locked':
+            self.abort_reason = LOCKED_MESSAGE.format(n=0, total=total)
+            self.progress.emit(0, total, self.abort_reason)
+            return False
+        self._has_local = state == 'ok'
 
         # Ensure the search indexes once (idempotent; returns immediately if
         # the indexes exist). Keeps the local search fast on databases
@@ -251,8 +322,8 @@ class GeocoderWorker(QObject):
             try:
                 from .local_geocoder import ensure_search_indexes
                 ensure_search_indexes()
-            except Exception:
-                pass
+            except Exception as e:
+                self._emit_detail(f'Suchindizes nicht geprüft: {e}')
             if self._db_bundeslaender is None:
                 try:
                     self._db_bundeslaender = list(get_db_stats().keys())
@@ -261,12 +332,17 @@ class GeocoderWorker(QObject):
             # Gemeinde/Ortsteil directory (one-time, 2–3 minutes on the nationwide DB);
             # reported via the progress text so it does not look like a hang.
             try:
-                ensure_lookup_tables(log=lambda m: self.progress.emit(0, total, m))
-            except Exception:
-                pass
+                ensure_lookup_tables(log=lambda m: self.progress.emit(0, total, m),
+                                     cancel=lambda: self._cancelled)
+            except Exception as e:
+                self._emit_detail(f'Suchverzeichnis nicht geprüft: {e}')
+            self._conn = get_connection(timeout=10.0)
         elif self._db_bundeslaender is None:
             self._db_bundeslaender = []
+        return True
 
+    def _geocode_rows(self, results, total):
+        last_nominatim = 0.0
         for i, row in enumerate(self.rows):
             if self._cancelled:
                 break
@@ -293,6 +369,8 @@ class GeocoderWorker(QObject):
                                             'lokale Suche nicht möglich')
 
                 if should_try:
+                    # A locked database (import running) raises DatabaseLocked
+                    # here; run() stops and keeps the results so far.
                     result = self._geocode_local(address_parts, bundesland)
                     if result['geocoded']:
                         bl_label = result.get('matched_bundesland') or bundesland or 'DB'
@@ -300,17 +378,15 @@ class GeocoderWorker(QObject):
                     else:
                         # Local search failed — determine the reason (for the
                         # 'local_diagnose' column; explains why the fallback ran)
-                        try:
-                            self._local_diagnose = diagnose_search(
-                                strasse    = ' '.join(x for x in (
-                                    address_parts.get('strasse', ''),
-                                    address_parts.get('hausnummer', '')) if x),
-                                plz        = address_parts.get('plz', ''),
-                                gemeinde   = address_parts.get('stadt', ''),
-                                bundesland = bundesland)
-                        except Exception:
-                            self._local_diagnose = ''
-                    self._last_bundesland = bundesland
+                        self._local_diagnose = diagnose_search(
+                            strasse    = ' '.join(x for x in (
+                                address_parts.get('strasse', ''),
+                                address_parts.get('hausnummer', '')) if x),
+                            plz        = address_parts.get('plz', ''),
+                            gemeinde   = address_parts.get('stadt', ''),
+                            bundesland = bundesland,
+                            conn       = self._conn,
+                            detail     = self._emit_detail)
 
             # No local hit or local DB not responsible → Nominatim, except in
             # DSGVO (GDPR) mode (local sources only, no online query).
@@ -338,12 +414,9 @@ class GeocoderWorker(QObject):
             # regardless of whether Nominatim was tried afterwards (online mode)
             # or not (DSGVO mode). _local_diagnose is empty on a local hit, so
             # it correctly stays '' there.
-            result['local_diagnose'] = getattr(self, '_local_diagnose', '')
+            result['local_diagnose'] = self._local_diagnose
             self._local_diagnose = ''
             results.append(result)
-
-        self.result_ready.emit(results)
-        self.finished.emit()
 
     def _build_parts(self, row):
         cm = self.col_map
@@ -356,6 +429,8 @@ class GeocoderWorker(QObject):
         for field in ['strasse', 'hausnummer', 'plz', 'stadt', 'land']:
             col          = cm.get(field, '')
             parts[field] = row[col].strip() if col and col in row else ''
+        # Spreadsheet numbers: 1067 / 1067.0 -> 01067
+        parts['plz'] = normalize_plz(parts['plz'])
         return parts
 
     @staticmethod
@@ -377,6 +452,7 @@ class GeocoderWorker(QObject):
             gemeinde   = parts.get('stadt', ''),
             bundesland = bundesland,
             max_results= 1,
+            conn       = self._conn,
         )
         if hits:
             h = hits[0]
@@ -412,7 +488,8 @@ class GeocoderWorker(QObject):
             # number on the street (that is how "Lorettoplatz 999" used to end
             # up at Lorettoplatz 7), but a well-defined point: the numerically
             # nearest house number or — without a house number in the input —
-            # the address point at the street midpoint.
+            # the address point at the street midpoint. The PLZ of the hit
+            # keeps the point in the right Ortsteil.
             x, y, epsg = h['x'], h['y'], h['epsg']
             label, name = 'Straße', h['strasse']
             try:
@@ -423,8 +500,12 @@ class GeocoderWorker(QObject):
                     h.get('strasse_norm'), h.get('gemeinde_norm'),
                     bundesland=h['bundesland'],
                     plz=h.get('plz') or parts.get('plz', ''),
-                    hausnummer=hn_in if h.get('hn_requested') else '')
-            except Exception:
+                    hausnummer=hn_in if h.get('hn_requested') else '',
+                    conn=self._conn)
+            except Exception as e:
+                if _is_locked_error(e):
+                    raise
+                self._emit_detail(f'Straßenpunkt nicht ermittelt: {e}')
                 rp = None
             if rp:
                 x, y, epsg = rp['x'], rp['y'], rp['epsg']
@@ -457,6 +538,7 @@ class GeocoderWorker(QObject):
             plz        = parts.get('plz', ''),
             gemeinde   = parts.get('stadt', ''),
             bundesland = bundesland,
+            conn       = self._conn,
         )
         if loc:
             is_plz = loc['label'].startswith('PLZ')
@@ -482,58 +564,97 @@ class GeocoderWorker(QObject):
 
     # ── Nominatim ────────────────────────────────────────────────────────────
 
-    def _geocode_nominatim(self, address):
+    def _sleep(self, seconds):
+        """Wait, but react to cancel within a fraction of a second."""
+        remaining = float(seconds)
+        while remaining > 0 and not self._cancelled:
+            step = min(0.25, remaining)
+            time.sleep(step)
+            remaining -= step
+
+    @staticmethod
+    def _retry_after(err, default):
         try:
-            params = urllib.parse.urlencode({
-                'q':              address,
-                'format':         'jsonv2',
-                'limit':          1,
-                'addressdetails': 1,
-            })
-            url = f'https://nominatim.openstreetmap.org/search?{params}'
-            req = urllib.request.Request(url, headers={
-                'User-Agent': f'QGIS-GISAkademieGeocoderPlugin/{PLUGIN_VERSION} '
-                              '(wieschmann@gis-akademie.de)'
-            })
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                data = json.loads(resp.read().decode('utf-8'))
-                if data:
-                    geo = data[0]
-                    imp = geo.get('importance')
-                    at  = geo.get('addresstype', '')
-                    t   = geo.get('type', '')
-                    cat = geo.get('category', '')
-                    lvl, lbl = calc_accuracy_nominatim(at, t, cat, imp)
-                    return {
-                        'geocoded':          True,
-                        'name':              geo.get('name', ''),
-                        'addresstype':       at,
-                        'importance':        round(float(imp), 4) if imp else None,
-                        'type':              t,
-                        'category':          cat,
-                        'accuracy_level':    lvl,
-                        'accuracy_label':    lbl,
-                        'local_score':       None,
-                        'local_score_label': '',
-                        'lat':               float(geo.get('lat', 0)),
-                        'lon':               float(geo.get('lon', 0)),
-                        'utm_x':             None,
-                        'utm_y':             None,
-                        'epsg':              4326,
-                    }
-        except Exception as e:
-            # A network/server error is different from "no hit" — mark it in
-            # the result so the user can tell them apart.
-            res = self._empty_result()
-            code = getattr(e, 'code', None)
-            if code == 429:
-                res['accuracy_label'] = 'Nominatim: zu viele Anfragen – später erneut versuchen'
-            elif code:
-                res['accuracy_label'] = f'Nominatim antwortet mit Fehler {code}'
-            else:
-                res['accuracy_label'] = 'Nominatim nicht erreichbar'
-            return res
+            v = float(err.headers.get('Retry-After'))
+            return min(max(v, 1.0), 120.0)
+        except Exception:
+            return default
+
+    def _geocode_nominatim(self, address):
+        """Query Nominatim (Germany only). On HTTP 429 'Too Many Requests'
+        wait (Retry-After or increasing delays) and retry a few times; the
+        request interval for the following rows is raised as well, so the
+        remaining rows do not all fail."""
+        for attempt in range(len(NOMINATIM_RETRY_DELAYS) + 1):
+            try:
+                return self._nominatim_request(address)
+            except urllib.error.HTTPError as e:
+                if (e.code == 429 and attempt < len(NOMINATIM_RETRY_DELAYS)
+                        and not self._cancelled):
+                    wait = self._retry_after(e, NOMINATIM_RETRY_DELAYS[attempt])
+                    self.delay = min(max(self.delay * 2, 2.0), NOMINATIM_MAX_DELAY)
+                    self._emit_detail(f'Nominatim: zu viele Anfragen (429) – '
+                                      f'neuer Versuch in {wait:.0f} s')
+                    self._sleep(wait)
+                    continue
+                return self._nominatim_error(e)
+            except Exception as e:
+                return self._nominatim_error(e)
         return self._empty_result()
+
+    def _nominatim_error(self, e):
+        # A network/server error is different from "no hit" — mark it in
+        # the result so the user can tell them apart.
+        res = self._empty_result()
+        code = getattr(e, 'code', None)
+        if code == 429:
+            res['accuracy_label'] = 'Nominatim: zu viele Anfragen – später erneut versuchen'
+        elif code:
+            res['accuracy_label'] = f'Nominatim antwortet mit Fehler {code}'
+        else:
+            res['accuracy_label'] = 'Nominatim nicht erreichbar'
+        return res
+
+    def _nominatim_request(self, address):
+        params = urllib.parse.urlencode({
+            'q':              address,
+            'format':         'jsonv2',
+            'limit':          1,
+            'addressdetails': 1,
+            'countrycodes':   'de',      # hits abroad must not count as geocoded
+        })
+        url = f'https://nominatim.openstreetmap.org/search?{params}'
+        req = urllib.request.Request(url, headers={
+            'User-Agent': f'QGIS-GISAkademieGeocoderPlugin/{PLUGIN_VERSION} '
+                          '(wieschmann@gis-akademie.de)'
+        })
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode('utf-8'))
+        if not data:
+            return self._empty_result()
+        geo = data[0]
+        imp = geo.get('importance')
+        at  = geo.get('addresstype', '')
+        t   = geo.get('type', '')
+        cat = geo.get('category', '')
+        lvl, lbl = calc_accuracy_nominatim(at, t, cat)
+        return {
+            'geocoded':          True,
+            'name':              geo.get('name', ''),
+            'addresstype':       at,
+            'importance':        round(float(imp), 4) if imp else None,
+            'type':              t,
+            'category':          cat,
+            'accuracy_level':    lvl,
+            'accuracy_label':    lbl,
+            'local_score':       None,
+            'local_score_label': '',
+            'lat':               float(geo.get('lat', 0)),
+            'lon':               float(geo.get('lon', 0)),
+            'utm_x':             None,
+            'utm_y':             None,
+            'epsg':              4326,
+        }
 
     def _empty_result(self):
         return {

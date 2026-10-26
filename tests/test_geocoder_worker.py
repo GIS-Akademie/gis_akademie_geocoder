@@ -122,3 +122,130 @@ def test_cancel_stops_early(worker_mod):
     w.progress.connect(lambda i, n, a: w.cancel() if i == 2 else None)
     w.run()
     assert len(out) == 2
+
+
+# ── Robustness: locked database / errors (review A10) ────────────────────────
+
+def _collect(w):
+    got = {'results': None, 'finished': False, 'progress': []}
+    w.result_ready.connect(lambda r: got.__setitem__('results', r))
+    w.finished.connect(lambda: got.__setitem__('finished', True))
+    w.progress.connect(lambda i, n, t: got['progress'].append(t))
+    return got
+
+
+def test_locked_db_at_start_reports_and_finishes(worker_mod, monkeypatch):
+    monkeypatch.setattr(gw, 'db_state', lambda timeout=5.0: 'locked')
+    rows = [{'str': 'Elchweg', 'hn': '3', 'plz': '44869', 'ort': 'Bochum', 'land': ''}]
+    w = gw.GeocoderWorker(rows, COL_MAP, local_only=True, bundeslaender=['Nordrhein-Westfalen'])
+    got = _collect(w)
+    w.run()
+    assert got['finished'] and got['results'] == []
+    assert 'Datenbank-Import' in w.abort_reason and 'gesperrt' in got['progress'][-1]
+
+
+def test_locked_db_mid_run_keeps_results(worker_mod, monkeypatch):
+    import sqlite3
+    from conftest import lg
+    # keep the one-time checks out of the way (they would wait for the lock)
+    monkeypatch.setattr(lg, 'ensure_search_indexes', lambda log=None: False)
+    monkeypatch.setattr(gw, 'ensure_lookup_tables', lambda **k: False)
+    monkeypatch.setattr(gw, 'get_connection', lambda timeout=5.0: lg.get_connection(0.05))
+    rows = [{'str': 'Elchweg', 'hn': '3', 'plz': '44869', 'ort': 'Bochum', 'land': ''}] * 3
+    w = gw.GeocoderWorker(rows, COL_MAP, local_only=True, bundeslaender=['Nordrhein-Westfalen'])
+    got = _collect(w)
+    writer = sqlite3.connect(lg.DB_PATH)
+
+    def lock_after_first(i, n, text):
+        if i == 2 and not writer.in_transaction:
+            writer.execute('BEGIN EXCLUSIVE')       # an import starts writing
+    w.progress.connect(lock_after_first)
+    try:
+        w.run()
+    finally:
+        writer.rollback()
+        writer.close()
+    assert got['finished']
+    assert len(got['results']) == 1 and got['results'][0]['accuracy_level'] == 5
+    assert w.abort_reason.startswith('Die lokale Datenbank ist gesperrt')
+    assert '(1 von 3)' in w.abort_reason
+
+
+def test_unexpected_error_still_finishes(worker_mod, monkeypatch):
+    def boom(*a, **k):
+        raise RuntimeError('kaputt')
+    monkeypatch.setattr(gw, 'local_search', boom)
+    rows = [{'str': 'Elchweg', 'hn': '3', 'plz': '44869', 'ort': 'Bochum', 'land': ''}]
+    w = gw.GeocoderWorker(rows, COL_MAP, local_only=True, bundeslaender=['Nordrhein-Westfalen'])
+    got = _collect(w)
+    details = []
+    w.detail.connect(details.append)
+    w.run()
+    assert got['finished'] and got['results'] == []
+    assert 'RuntimeError' in w.abort_reason and details and 'kaputt' in details[0]
+
+
+# ── PLZ / house number handling in the worker ────────────────────────────────
+
+def test_numeric_plz_from_spreadsheet(worker_mod):
+    out = _run(worker_mod, [{'str': 'Elchweg', 'hn': '3', 'plz': '44869.0', 'ort': '', 'land': ''}])
+    assert out[0]['accuracy_level'] == 5 and out[0]['address_query'] == 'Elchweg 3, 44869'
+
+
+def test_glued_hausnummer_in_worker(worker_mod):
+    out = _run(worker_mod, [{'str': 'Elchweg3', 'hn': '', 'plz': '44869', 'ort': 'Bochum', 'land': ''}])
+    assert (out[0]['accuracy_level'], out[0]['name']) == (5, 'Elchweg 3')
+
+
+# ── Nominatim (B3, B5) — urlopen is replaced, nothing goes online ────────────
+
+def test_importance_does_not_raise_level():
+    assert gw.calc_accuracy_nominatim('road', 'residential', 'highway', 0.9) == (4, 'Straße')
+    assert gw.calc_accuracy_nominatim('city', 'city', 'place', 0.8) == (2, 'Stadt')
+
+
+class _Resp:
+    def __init__(self, data):
+        self._data = data
+
+    def read(self):
+        import json
+        return json.dumps(self._data).encode('utf-8')
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+def test_nominatim_429_backoff_and_countrycodes(monkeypatch):
+    import urllib.error
+    calls, sleeps = [], []
+
+    def fake_urlopen(req, timeout=10):
+        calls.append(req.full_url)
+        if len(calls) < 3:
+            raise urllib.error.HTTPError(req.full_url, 429, 'Too Many Requests', {}, None)
+        return _Resp([{'lat': '52.5', 'lon': '13.4', 'addresstype': 'road', 'type': 'residential',
+                       'category': 'highway', 'importance': 0.9, 'name': 'Zeil'}])
+    monkeypatch.setattr(gw.urllib.request, 'urlopen', fake_urlopen)
+    monkeypatch.setattr(gw.time, 'sleep', lambda s: sleeps.append(s))
+    w = gw.GeocoderWorker([], {}, delay=1.1)
+    res = w._geocode_nominatim('Zeil 1, Frankfurt')
+    assert res['geocoded'] and res['accuracy_level'] == 4
+    assert len(calls) == 3 and all('countrycodes=de' in u for u in calls)
+    assert sum(sleeps) == pytest.approx(gw.NOMINATIM_RETRY_DELAYS[0] + gw.NOMINATIM_RETRY_DELAYS[1])
+    assert w.delay > 1.1                       # following rows are slowed down
+
+
+def test_nominatim_429_gives_up_after_retries(monkeypatch):
+    import urllib.error
+
+    def fake_urlopen(req, timeout=10):
+        raise urllib.error.HTTPError(req.full_url, 429, 'Too Many Requests', {}, None)
+    monkeypatch.setattr(gw.urllib.request, 'urlopen', fake_urlopen)
+    monkeypatch.setattr(gw.time, 'sleep', lambda s: None)
+    w = gw.GeocoderWorker([], {})
+    res = w._geocode_nominatim('x')
+    assert not res['geocoded'] and 'zu viele Anfragen' in res['accuracy_label']

@@ -52,6 +52,7 @@ auch ohne Abo vollständig.
 ## Änderungsprotokoll
 
 <!-- AENDERUNGEN -->
+- **1.0.1** – Hilfe: Aufwand je Bundesland neu gemessen, mit einer bereits gefüllten bundesweiten Datenbank (u.a. Baden-Württemberg ca. 11, Bayern ca. 15, Rheinland-Pfalz ca. 6 Minuten); für alle Länder zusammen rund 2,5–3 Stunden. Angezeigte Dauer beim Abruf von Bayern und Nordrhein-Westfalen angepasst.
 - **1.0** – Erste Veröffentlichung im QGIS-Plugin-Verzeichnis. Geocodiert Adresstabellen (CSV, Excel, OpenDocument, Tab-getrennt) gegen eine lokale Datenbank amtlicher Hauskoordinaten aller 16 Bundesländer, optional mit Nominatim als Ausweichsuche oder vollständig offline (DSGVO-Modus). Die Datenbank wird im Plugin eingerichtet und aktualisiert: Ein Klick lädt die offenen Daten der Länder und importiert nur, was sich geändert hat; die Quellenliste lässt sich online aktualisieren. Fehlende Postleitzahlen werden aus den mitgelieferten PLZ-Gebieten (OpenStreetMap) ergänzt.
 <!-- /AENDERUNGEN -->
 

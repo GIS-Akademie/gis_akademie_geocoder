@@ -9,8 +9,8 @@ internet or a file on this computer):
      size/modification time for files); sources with a lock after download
      (min_abstand_tage) are skipped as long as the last download is more recent;
   2. load the data files with the existing import workers (HK-DE text,
-     INSPIRE GML, shapefile) — each import replaces the data of its
-     Bundesland in its own transaction;
+     INSPIRE GML, shapefile) — all files of a Bundesland in ONE transaction
+     that replaces its data (on any error or cancel nothing changes);
   3. record the state in source_meta;
   4. at the end, rebuild the search index (municipality/locality index) ONCE
      (instead of after each individual state).
@@ -97,11 +97,7 @@ class SourceUpdateWorker(QObject):
         self.plz_ergaenzt   = {}       # {bundesland: count} from the postcode (PLZ) post-pass
         self._cancelled     = False
         self._current       = None     # currently running import worker
-        self._plz           = None     # (source, field, layername)
         self._prefix        = ''
-
-    def set_plz_layer(self, source, field='plz', layername=None):
-        self._plz = (source, field or 'plz', layername)
 
     def cancel(self):
         self._cancelled = True
@@ -115,7 +111,10 @@ class SourceUpdateWorker(QObject):
         return self._cancelled
 
     def _emit_progress(self, done, total, text):
-        self.progress.emit(int(done), int(total), f'{self._prefix}{text}')
+        done, total = int(done), int(total)
+        while max(done, total) > 2_000_000_000:      # Qt int signal: stay below 2^31
+            done, total = done // 1024, total // 1024
+        self.progress.emit(done, total, f'{self._prefix}{text}')
 
     # ------------------------------------------------------------------ #
     def run(self):
@@ -128,8 +127,11 @@ class SourceUpdateWorker(QObject):
 
     def _run(self):
         if self.check_catalog:
-            self.catalog_status, text = _sd.fetch_online_catalog(
-                user_agent_version=self.plugin_version)
+            try:
+                self.catalog_status, text = _sd.fetch_online_catalog(
+                    user_agent_version=self.plugin_version)
+            except Exception as e:      # never let the list check stop the update
+                self.catalog_status, text = 'fehler', f'Quellenliste nicht geprüft ({e})'
             if self.catalog_status in ('neu', 'zu_neu'):
                 self.log.emit(text)
             else:
@@ -148,7 +150,8 @@ class SourceUpdateWorker(QObject):
             try:
                 status, text = self._update_one(bl, cat)
             except Cancelled:
-                status, text = 'abgebrochen', 'Der bisherige Datenbestand bleibt erhalten.'
+                status, text = 'abgebrochen', ('Abgebrochen – der bisherige Datenbestand bleibt '
+                                               'erhalten.')
                 self._cancelled = True
             except SourceError as e:
                 status, text = 'fehler', str(e)
@@ -187,8 +190,13 @@ class SourceUpdateWorker(QObject):
             self._emit_progress(0, 0, 'Suchverzeichnis wird aktualisiert …')
             conn = sqlite3.connect(_lc.DB_PATH)
             try:
-                _lc.rebuild_lookup_tables(conn, self.log.emit)
+                _lc.rebuild_lookup_tables(conn, self.log.emit, cancel=self._is_cancelled)
                 conn.commit()
+            except _lc.RebuildCancelled:
+                # The previous directory stays; it is rebuilt automatically at the
+                # next geocoding run because the address count no longer matches.
+                self.log.emit('Abgebrochen – das Suchverzeichnis wird beim nächsten Geocodieren '
+                              'aktualisiert.')
             finally:
                 conn.close()
 
@@ -249,17 +257,20 @@ class SourceUpdateWorker(QObject):
             cat2['sources'][bl] = dict(alt, _herkunft=entry.get('_herkunft', 'standard'))
             return self._update_entry(bl, cat2)
 
-    @staticmethod
-    def _has_addresses(bl):
+    def _has_addresses(self, bl):
+        """Does the state already have addresses? If the database cannot be
+        read (e.g. locked), assume yes — so that an older fallback source never
+        replaces existing data by mistake."""
         try:
-            conn = sqlite3.connect(_lc.DB_PATH)
+            conn = sqlite3.connect(_lc.DB_PATH, timeout=30)
             try:
                 return conn.execute('SELECT 1 FROM addresses WHERE bundesland = ? LIMIT 1',
                                     (bl,)).fetchone() is not None
             finally:
                 conn.close()
-        except Exception:
-            return False
+        except Exception as e:
+            self.detail.emit(f'{bl}: Bestand nicht lesbar ({e}) – Ausweichquelle nicht genutzt')
+            return True
 
     def _update_entry(self, bl, cat):
         prev = _lc.get_source_meta(bl)
@@ -284,6 +295,8 @@ class SourceUpdateWorker(QObject):
                 self.log.emit(result['text'])
             return 'unverändert', result['text']
 
+        if self._cancelled:
+            raise Cancelled()
         files = result['files']
         fmt   = result['format']
         self._remote_meta = {}
@@ -302,7 +315,7 @@ class SourceUpdateWorker(QObject):
         meta.update(self._remote_meta)
         meta['importiert_am'] = meta.get('heruntergeladen_am')
         try:
-            meta['adressen'] = _lc.get_db_stats().get(bl)
+            meta['adressen'] = _lc.count_addresses(bl)
         except Exception:
             meta['adressen'] = None
         _lc.save_source_meta(bl, **meta)
@@ -335,67 +348,38 @@ class SourceUpdateWorker(QObject):
         self.detail.emit(f'{bl}: Temporäre Download-Dateien gelöscht ({_n(size / 1e6)} MB, {cache}).')
 
     def _import(self, bl, files, fmt, entry=None):
-        """Load data files with the matching import worker. The first file
-        replaces (if requested) the data of the Bundesland, further files
-        are appended. The index is only built at the end of _run.
-        Returns (ok, message)."""
+        """Load data files with the matching import worker — all files of the
+        Bundesland in ONE transaction that replaces its data (if requested): on
+        an error, an empty file or a cancel nothing changes. The index is only
+        built at the end of _run. Returns (ok, message)."""
         entry = entry or {}
-        from .db_import_worker import DbImportWorker
-        from .gml_import_worker import GmlImportWorker
-
-        outcome = {}
-
-        def _done(ok, msg):
-            outcome['ok'], outcome['msg'] = ok, msg
-
-        if fmt == 'gml':
-            w = GmlImportWorker(files, bl, replace=self.replace,
-                                gemeinde_level=entry.get('gemeinde_ebene'),
-                                rebuild_lookup=False, announce=False)
-            self._wire(w, _done)
-            w.run()
-            return outcome.get('ok', False), outcome.get('msg', 'unbekannt')
-
-        if fmt == 'hkde':
-            msgs = []
-            for i, f in enumerate(files):
-                if self._cancelled:
-                    return False, 'Abgebrochen.'
-                outcome.clear()
-                w = DbImportWorker(f, bl, replace=(self.replace and i == 0),
-                                   rebuild_lookup=False, announce=False)
-                self._wire(w, _done)
-                w.run()
-                if not outcome.get('ok'):
-                    return False, outcome.get('msg', 'Import fehlgeschlagen')
-                msgs.append(outcome['msg'])
-            return True, ' | '.join(msgs)
-
+        if self._cancelled:
+            return False, 'Abgebrochen.'
         if fmt == 'osm':
             return self._import_osm(bl, files, entry)
-
-        if fmt == 'shp':
+        # Without "Auch ohne neue Daten erneut laden" a much smaller dataset
+        # (e.g. an incomplete file) does not replace the existing one.
+        common = dict(replace=self.replace, rebuild_lookup=False, announce=False,
+                      allow_shrink=self.force)
+        if fmt == 'gml':
+            from .gml_import_worker import GmlImportWorker
+            w = GmlImportWorker(files, bl, gemeinde_level=entry.get('gemeinde_ebene'), **common)
+        elif fmt == 'hkde':
+            from .db_import_worker import DbImportWorker
+            w = DbImportWorker(list(files), bl, **common)
+        elif fmt == 'shp':
             from .shp_import_worker import ShpImportWorker
-            # A zip yields .shp, .shx, .dbf, .prj … — one import per .shp
+            # A zip yields .shp, .shx, .dbf, .prj … — the import reads the .shp files
             files = [f for f in files if f.lower().endswith('.shp')]
             if not files:
                 return False, 'Im Download wurde kein Shapefile gefunden.'
-            msgs = []
-            for i, f in enumerate(files):
-                if self._cancelled:
-                    return False, 'Abgebrochen.'
-                outcome.clear()
-                w = ShpImportWorker(f, bl, entry.get('felder') or {},
-                                    replace=(self.replace and i == 0),
-                                    rebuild_lookup=False, announce=False)
-                self._wire(w, _done)
-                w.run()
-                if not outcome.get('ok'):
-                    return False, outcome.get('msg', 'Import fehlgeschlagen')
-                msgs.append(outcome['msg'])
-            return True, ' | '.join(msgs)
-
-        return False, f'Format {fmt!r} wird vom automatischen Import nicht unterstützt.'
+            w = ShpImportWorker(files, bl, entry.get('felder') or {}, **common)
+        else:
+            return False, f'Format {fmt!r} wird vom automatischen Import nicht unterstützt.'
+        outcome = {}
+        self._wire(w, lambda ok, msg: outcome.update(ok=ok, msg=msg))
+        w.run()
+        return outcome.get('ok', False), outcome.get('msg', 'Import fehlgeschlagen')
 
     def _import_remote(self, bl, urls, fmt, entry):
         """Many files (one per district/Kreis): download each file, convert it to
@@ -409,8 +393,7 @@ class SourceUpdateWorker(QObject):
         cache = _sd.cache_dir_for(_lc.DB_PATH, bl)
         os.makedirs(cache, exist_ok=True)
         txt = os.path.join(cache, 'adressen_alkis.txt')
-        http = _sd.Http(f'QGIS-GISAkademieGeocoder/{self.plugin_version} (+https://gis-akademie.de)',
-                        timeout=120)
+        http = _sd.Http(_sd.user_agent(self.plugin_version), timeout=120)
         seen, etags, stand = set(), {}, []
         summe = {'adressen': 0, 'doppelt': 0, 'ohne_gemeinde': 0}
         try:
@@ -496,8 +479,8 @@ class SourceUpdateWorker(QObject):
 
     def _wire(self, worker, done_cb):
         self._current = worker
-        if self._plz and hasattr(worker, 'set_plz_layer'):
-            worker.set_plz_layer(*self._plz)
+        if self._cancelled:              # cancel arrived while the worker was being set up
+            worker.cancel()
         worker.log.connect(self.log.emit)
         if hasattr(worker, 'detail'):
             worker.detail.connect(self.detail.emit)

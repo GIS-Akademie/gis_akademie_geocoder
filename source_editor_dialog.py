@@ -14,6 +14,7 @@ updated individually or the file imported: the dialog then closes with
 action = 'update', and the caller starts the download.
 """
 
+import contextlib
 import os
 import zipfile
 
@@ -467,11 +468,9 @@ class SourceEditDialog(QDialog):
         h_content = (lay.totalHeightForWidth(inner) if lay.hasHeightForWidth()
                      else self._content.sizeHint().height())
         h = h_content + self.btn_action.sizeHint().height() + 40
-        try:
+        with contextlib.suppress(Exception):
             scr = (self.screen() if hasattr(self, 'screen') else None) or QApplication.primaryScreen()
             h = min(h, int(scr.availableGeometry().height() * 0.9))
-        except Exception:
-            pass
         self.resize(width, h)
 
     # ------------------------------------------------------------------ #

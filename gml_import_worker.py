@@ -14,9 +14,13 @@ Strategy: two-pass streaming with xml.etree.ElementTree iterparse.
   Pass 2: process Address features and resolve references
 """
 
+import contextlib
 import os
 import re
-import xml.etree.ElementTree as ET
+# The GML files come from the official surveying offices. Python's expat-based
+# ElementTree does not resolve external entities (no XXE) and expat >= 2.4
+# limits entity expansion ("billion laughs"); defusedxml is not part of QGIS.
+import xml.etree.ElementTree as ET  # nosec B405
 
 from qgis.PyQt.QtCore import QObject, pyqtSignal
 
@@ -225,7 +229,7 @@ class GmlImportWorker(QObject):
         aborted — partial data would replace the complete existing data)."""
         for path in (self.filepaths if paths is None else paths):
             try:
-                for event, elem in ET.iterparse(path, events=('end',)):
+                for event, elem in ET.iterparse(path, events=('end',)):  # nosec B314
                     if _is_member(elem.tag):
                         yield elem
                     elif self._cancelled:
@@ -503,8 +507,8 @@ class GmlImportWorker(QObject):
     def preview_file(filepath, n=2):
         """Quick preview: reads the first n Address features."""
         results = []
-        try:
-            for event, elem in ET.iterparse(filepath, events=('end',)):
+        with contextlib.suppress(Exception):
+            for event, elem in ET.iterparse(filepath, events=('end',)):  # nosec B314
                 if _is_member(elem.tag):
                     addr = elem.find(f'.//{_tag("ad", "Address")}')
                     if addr is not None:
@@ -535,6 +539,4 @@ class GmlImportWorker(QObject):
                     elem.clear()
                 if len(results) >= n:
                     break
-        except Exception:
-            pass
         return results

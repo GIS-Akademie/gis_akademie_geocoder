@@ -17,6 +17,7 @@ along municipal boundaries are checked with point-in-polygon (GEOS).
 License of the LGLN data: CC BY 4.0, „© GeoBasis-DE/LGLN <Jahr>, Daten geändert“.
 """
 
+import contextlib
 import os
 import re
 import zipfile
@@ -144,6 +145,23 @@ class _GemeindeRaster:
         return ''
 
 
+def _building_points(g, tr_lookup, tr):
+    """(x, y in the parcels' coordinate system for the municipality lookup,
+    x, y in the target system) of a building, or None without a usable point."""
+    p = g.PointOnSurface() if g.GetDimension() == 2 else g.Centroid()
+    if p is None or p.IsEmpty():
+        return None
+    if tr_lookup is not None:
+        q = p.Clone()
+        q.Transform(tr_lookup)
+        lx, ly = q.GetX(), q.GetY()
+    else:
+        lx, ly = p.GetX(), p.GetY()
+    if tr is not None:
+        p.Transform(tr)
+    return lx, ly, p.GetX(), p.GetY()
+
+
 def alkis_to_rows(path, out_fh, bundesland, kreis='', cfg=None, cancel=None, seen=None,
                   progress=None, detail=None):
     """Append buildings with an address from an ALKIS GeoPackage (or zip) as
@@ -167,10 +185,8 @@ def alkis_to_rows(path, out_fh, bundesland, kreis='', cfg=None, cancel=None, see
     raster = _GemeindeRaster(flst, cfg['gemeinde_feld'], cancel)
 
     def _traditional(s):
-        try:
+        with contextlib.suppress(AttributeError):
             s.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
-        except AttributeError:
-            pass
         return s
 
     # Output: building points in the target EPSG. Municipality lookup: in the
@@ -213,21 +229,12 @@ def alkis_to_rows(path, out_fh, bundesland, kreis='', cfg=None, cancel=None, see
         g = f.GetGeometryRef()
         if not strasse or not hn or g is None:
             continue
-        try:
-            p = g.PointOnSurface() if g.GetDimension() == 2 else g.Centroid()
-            if p is None or p.IsEmpty():
-                continue
-            if tr_lookup is not None:
-                q = p.Clone()
-                q.Transform(tr_lookup)
-                lx, ly = q.GetX(), q.GetY()
-            else:
-                lx, ly = p.GetX(), p.GetY()
-            if tr is not None:
-                p.Transform(tr)
-            x, y = p.GetX(), p.GetY()
-        except Exception:
+        pts = None
+        with contextlib.suppress(Exception):      # broken geometry: building is skipped
+            pts = _building_points(g, tr_lookup, tr)
+        if pts is None:
             continue
+        lx, ly, x, y = pts
         st['gebaeude'] += 1
         gmd = raster.lookup(lx, ly)
         if not gmd:

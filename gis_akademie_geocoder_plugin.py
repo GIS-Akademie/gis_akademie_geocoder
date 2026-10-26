@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 
+import contextlib
 import os
 from qgis.PyQt.QtWidgets import QAction
 from qgis.PyQt.QtGui import QIcon
@@ -92,12 +93,10 @@ class GISAkademieGeocoderPlugin:
         # otherwise 'QThread: Destroyed while thread is still running' and a
         # crash when reloading/uninstalling the plugin during an import.
         if self.dialog is not None:
-            try:
+            with contextlib.suppress(Exception):
                 self.dialog.shutdown()
                 self.dialog.close()
                 self.dialog.deleteLater()
-            except Exception:
-                pass
             self.dialog = None
         self.iface.removePluginVectorMenu('&GIS-Akademie Geocoder', self.action)
         self.iface.removeToolBarIcon(self.action)
@@ -106,10 +105,8 @@ class GISAkademieGeocoderPlugin:
         if self.dialog is None:
             self.dialog = GISAkademieGeocoderDialog(self.iface)
         if self._db_warning:
-            try:
+            with contextlib.suppress(Exception):
                 self.iface.messageBar().pushWarning('GIS-Akademie Geocoder', self._db_warning)
-            except Exception:
-                pass
             self._db_warning = None
         self.dialog.show()
         self.dialog.raise_()

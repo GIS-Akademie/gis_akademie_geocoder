@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 
+import contextlib
 import time
 import traceback
 import urllib.error
@@ -24,14 +25,12 @@ from .local_geocoder import (search as local_search, db_state, normalize,
 
 def _plugin_version():
     """Version from metadata.txt (for the Nominatim User-Agent)."""
-    try:
+    with contextlib.suppress(Exception):
         meta = os.path.join(os.path.dirname(__file__), 'metadata.txt')
         with open(meta, encoding='utf-8') as f:
             for line in f:
                 if line.strip().lower().startswith('version='):
                     return line.split('=', 1)[1].strip()
-    except Exception:
-        pass
     return 'unbekannt'
 
 
@@ -266,10 +265,8 @@ class GeocoderWorker(QObject):
         self._cancelled = True
 
     def _emit_detail(self, text):
-        try:
+        with contextlib.suppress(Exception):
             self.detail.emit(text)
-        except Exception:
-            pass
 
     def run(self):
         """Geocode all rows. Always ends with result_ready (the results so
@@ -289,16 +286,12 @@ class GeocoderWorker(QObject):
                                      f'bisherigen Ergebnisse ({len(results)} von {total}) '
                                      'bleiben erhalten.')
             self._emit_detail('Geocodierung abgebrochen:\n' + traceback.format_exc())
-            try:
+            with contextlib.suppress(Exception):
                 self.progress.emit(len(results), total, self.abort_reason)
-            except Exception:
-                pass
         finally:
             if self._conn is not None:
-                try:
+                with contextlib.suppress(Exception):
                     self._conn.close()
-                except Exception:
-                    pass
                 self._conn = None
             self.result_ready.emit(results)
             self.finished.emit()

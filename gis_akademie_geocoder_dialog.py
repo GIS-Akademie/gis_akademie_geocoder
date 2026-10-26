@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 
+import contextlib
 import os
 import csv
 import math
@@ -81,11 +82,9 @@ PLZ_SETTINGS_KEY = 'gis_akademie_geocoder/plz_quelle'   # user-defined postcode 
 # QVariant.Type enums.
 def _field_types():
     if Qgis.QGIS_VERSION_INT >= 33800:
-        try:
+        with contextlib.suppress((ImportError, AttributeError)):
             from qgis.PyQt.QtCore import QMetaType
             return QMetaType.Type.QString, QMetaType.Type.Int, QMetaType.Type.Double
-        except (ImportError, AttributeError):
-            pass
     return QVariant.String, QVariant.Int, QVariant.Double
 
 
@@ -181,26 +180,20 @@ class GISAkademieGeocoderDialog(QDialog, FORM_CLASS):
         # real input/output fields (viewports and tab pages otherwise paint the
         # light "Base" color — among other places behind the bottom button bar).
         for _sa in (self.geocode_scroll, self.admin_scroll):
-            try:
+            with contextlib.suppress(Exception):
                 _vp = _sa.viewport()
                 _vp.setBackgroundRole(_win_role)
                 _vp.setAutoFillBackground(True)
-            except Exception:
-                pass
         for _w in (self.tab_geocode, self.tab_admin, self.tab_multi, self.tab_single):
-            try:
+            with contextlib.suppress(Exception):
                 _w.setBackgroundRole(_win_role)
                 _w.setAutoFillBackground(True)
-            except Exception:
-                pass
         # Render tabs flat (document mode): removes the light frame around the
         # tab pages (sometimes visible on one side only) and the white fill of
         # the active tab — without a stylesheet, theme-compliant.
         for _tw in (self.tab_widget, self.tabs_mapping):
-            try:
+            with contextlib.suppress(Exception):
                 _tw.setDocumentMode(True)
-            except Exception:
-                pass
 
         self._rows    = []
         self._headers = []
@@ -253,22 +246,16 @@ class GISAkademieGeocoderDialog(QDialog, FORM_CLASS):
         for thread, worker in jobs:
             if worker is not None:
                 if hasattr(worker, 'cancel'):
-                    try:
+                    with contextlib.suppress(Exception):
                         worker.cancel()
-                    except Exception:
-                        pass
                 # After closing, do not process/write any more results — but let
                 # the worker still end its thread.
                 for sig in ('finished', 'result_ready', 'progress', 'log', 'detail'):
-                    try:
+                    with contextlib.suppress(Exception):
                         getattr(worker, sig).disconnect()
-                    except Exception:
-                        pass
                 if thread is not None:
-                    try:
+                    with contextlib.suppress(Exception):
                         worker.finished.connect(thread.quit)
-                    except Exception:
-                        pass
             if thread is not None and thread.isRunning():
                 thread.quit()
                 if not thread.wait(wait_ms):
@@ -416,11 +403,9 @@ class GISAkademieGeocoderDialog(QDialog, FORM_CLASS):
         for job in list(self._stats_jobs):
             if job[0] is thread:
                 self._stats_jobs.remove(job)
-                try:
+                with contextlib.suppress(Exception):
                     job[1].deleteLater()
                     job[0].deleteLater()
-                except Exception:
-                    pass
 
     def _on_db_stats_ready(self, stats, db_path, generation=0):
         # Outdated result (requested again in the meantime) or different path →
@@ -1316,13 +1301,11 @@ class GISAkademieGeocoderDialog(QDialog, FORM_CLASS):
     @staticmethod
     def _edit_icon():
         """Pencil icon from the QGIS theme (editing mode)."""
-        try:
+        with contextlib.suppress(Exception):
             from qgis.core import QgsApplication
             ic = QgsApplication.getThemeIcon('/mActionToggleEditing.svg')
             if ic is not None and not ic.isNull():
                 return ic
-        except Exception:
-            pass
         return None
 
     @staticmethod
@@ -1688,36 +1671,30 @@ class GISAkademieGeocoderDialog(QDialog, FORM_CLASS):
     @staticmethod
     def _gpkg_sublayers(path):
         names = []
-        try:
+        with contextlib.suppress(Exception):
             from qgis.core import QgsProviderRegistry
             for sub in QgsProviderRegistry.instance().querySublayers(path):
                 n = sub.name()
                 if n and n not in names:
                     names.append(n)
-        except Exception:
-            pass
         if not names:
-            try:
+            with contextlib.suppress(Exception):
                 from qgis.core import QgsVectorLayer
                 vl = QgsVectorLayer(path, 'tmp', 'ogr')
                 for s in vl.dataProvider().subLayers():
                     parts = s.split('!!::!!')
                     if len(parts) > 1 and parts[1] not in names:
                         names.append(parts[1])
-            except Exception:
-                pass
         return names
 
     @staticmethod
     def _layer_field_names(path, layername=None):
-        try:
+        with contextlib.suppress(Exception):
             from qgis.core import QgsVectorLayer
             uri = path if not layername else f'{path}|layername={layername}'
             vl = QgsVectorLayer(uri, 'tmp', 'ogr')
             if vl.isValid():
                 return [f.name() for f in vl.fields()]
-        except Exception:
-            pass
         return []
 
     def _import_cancel(self):
@@ -1762,10 +1739,8 @@ class GISAkademieGeocoderDialog(QDialog, FORM_CLASS):
 
         # Release worker/thread cleanly so that old signal connections
         # do not affect a subsequent import
-        try:
+        with contextlib.suppress(Exception):
             self._imp_worker.deleteLater()
-        except Exception:
-            pass
         self._imp_worker = None
 
         if success:
@@ -1777,10 +1752,8 @@ class GISAkademieGeocoderDialog(QDialog, FORM_CLASS):
 
     def _tech_log(self, msg):
         """Technical details to the QGIS message log (for support)."""
-        try:
+        with contextlib.suppress(Exception):
             QgsMessageLog.logMessage(str(msg), LOG_TAG, _MSG_INFO)
-        except Exception:
-            pass
 
     def _import_log(self, msg):
         self.import_log.append(msg)

@@ -21,6 +21,10 @@ Usage:
     python tools/build_zip.py                 # build and check
     python tools/build_zip.py --urls          # additionally fetch repository/tracker/homepage
     python tools/build_zip.py --dirty         # test build with uncommitted changes
+
+With bandit, detect-secrets and flake8 installed (pip install bandit detect-secrets flake8) the
+files are checked like the security scan of the plugin repository; every finding
+stops the build.
 """
 import os
 import re
@@ -121,6 +125,58 @@ def check_metadata(meta, errors, warnings):
         errors.append(f'metadata.txt: Symbol {icon} fehlt')
 
 
+FLAKE8_ACTIVE = ('E901,E902,E999,F821,F823,F831,C901,E101,E711,E712,E713,E714,E721,E722,E731,'
+                 'E741,E742,E743,F402,F403,F404,F405,F811,F822,F901,W605')
+
+
+def check_security(files, errors, warnings):
+    """Bandit like the security scan of plugins.qgis.org: every finding in the
+    plugin's Python files is an error (the repository blocks critical ones and
+    lists all others). Needs bandit in this Python (pip install bandit)."""
+    import json
+    pys = [os.path.join(PLUGIN_DIR, f) for f in files if f.endswith('.py')]
+    try:
+        out = subprocess.run([sys.executable, '-m', 'bandit', '-q', '-f', 'json', *pys],  # nosec B603
+                             cwd=PLUGIN_DIR, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        report = json.loads(out.stdout.decode('utf-8') or '{}')
+    except (OSError, ValueError):
+        report = None
+    if not report or 'results' not in report:
+        warnings.append('Bandit nicht verfügbar — Sicherheitsprüfung übersprungen '
+                        '(pip install bandit, dann erneut bauen)')
+        return
+    for r in report['results']:
+        path = os.path.relpath(r['filename'], PLUGIN_DIR)
+        errors.append(f'Bandit {r["test_id"]} in {path}:{r["line_number"]}: {r["issue_text"]}')
+    # flake8 with the rules that are active on plugins.qgis.org (as of October 2026)
+    try:
+        out = subprocess.run([sys.executable, '-m', 'flake8', f'--select={FLAKE8_ACTIVE}', *pys],  # nosec B603
+                             cwd=PLUGIN_DIR, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        if out.returncode not in (0, 1) or b'No module named' in out.stderr:
+            raise OSError(out.stderr.decode('utf-8', 'replace'))
+        for line in out.stdout.decode('utf-8', 'replace').splitlines():
+            errors.append(f'flake8 {os.path.relpath(line.split(":", 1)[0], PLUGIN_DIR)}:'
+                          f'{line.split(":", 1)[1] if ":" in line else line}')
+    except OSError:
+        warnings.append('flake8 nicht verfügbar — Codeprüfung übersprungen (pip install flake8)')
+    # detect-secrets (the second blocking scanner): no credentials in any file
+    try:
+        out = subprocess.run([sys.executable, '-m', 'detect_secrets', 'scan', '--all-files',  # nosec B603
+                              *[os.path.join(PLUGIN_DIR, f) for f in files]],
+                             cwd=PLUGIN_DIR, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        secrets = json.loads(out.stdout.decode('utf-8') or '{}').get('results')
+    except (OSError, ValueError):
+        secrets = None
+    if secrets is None:
+        warnings.append('detect-secrets nicht verfügbar — Prüfung auf Zugangsdaten übersprungen '
+                        '(pip install detect-secrets)')
+        return
+    for path, found in secrets.items():
+        for r in found:
+            errors.append(f'detect-secrets {r["type"]} in {os.path.relpath(path, PLUGIN_DIR)}:'
+                          f'{r["line_number"]}')
+
+
 def check_names(names, errors, warnings):
     for n in names:
         parts = n.split('/')
@@ -179,6 +235,7 @@ def main():
     files = [f for f in files if os.path.exists(os.path.join(PLUGIN_DIR, f))]
     names = [f'{PACKAGE}/{f}' for f in files]
     check_names(names, errors, warnings)
+    check_security(files, errors, warnings)
     if args.urls:
         check_urls(meta, errors)
 

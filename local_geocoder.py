@@ -3,6 +3,7 @@
 Local geocoding core based on SQLite + Levenshtein.
 """
 
+import contextlib
 import os
 import sqlite3
 import re
@@ -404,7 +405,8 @@ _PLZ_PREFIX_GROUPS = {
 PLZ_PREFIX_TO_BUNDESLAND = {}
 for _bl, _prefixes in _PLZ_PREFIX_GROUPS.items():
     for _p in _prefixes:
-        assert _p not in PLZ_PREFIX_TO_BUNDESLAND, f'PLZ-Präfix {_p} doppelt'
+        if _p in PLZ_PREFIX_TO_BUNDESLAND:
+            raise ValueError(f'PLZ-Präfix {_p} doppelt')
         PLZ_PREFIX_TO_BUNDESLAND[_p] = _bl
 
 
@@ -481,7 +483,7 @@ def _ensure_indexes(conn):
     global _indexes_ensured
     if _indexes_ensured:
         return
-    try:
+    with contextlib.suppress(Exception):
         conn.executescript(
             "CREATE INDEX IF NOT EXISTS idx_bundesland   ON addresses(bundesland);"
             "CREATE INDEX IF NOT EXISTS idx_strasse_norm ON addresses(strasse_norm);"
@@ -490,8 +492,6 @@ def _ensure_indexes(conn):
         )
         conn.commit()
         _indexes_ensured = True
-    except Exception:
-        pass
 
 
 def ensure_search_indexes(log=None):
@@ -501,7 +501,6 @@ def ensure_search_indexes(log=None):
     With the optional log callback a message is emitted BEFORE the build
     (which may take several minutes on large databases) — otherwise the
     application appears frozen during the one-time index build."""
-    global _indexes_ensured
     if _indexes_ensured:
         return False
     conn = get_connection()
@@ -511,17 +510,13 @@ def ensure_search_indexes(log=None):
         need = {'idx_bundesland', 'idx_strasse_norm', 'idx_gem_str', 'idx_plz_str'}
         missing = need - have
         if missing and log:
-            try:
+            with contextlib.suppress(Exception):
                 log('Die Datenbank wird einmalig für die Suche vorbereitet. '
                     'Das kann einige Minuten dauern …')
-            except Exception:
-                pass
         _ensure_indexes(conn)
         if missing and log:
-            try:
+            with contextlib.suppress(Exception):
                 log('Datenbank vorbereitet.')
-            except Exception:
-                pass
         return bool(missing)
     finally:
         conn.close()
@@ -615,12 +610,10 @@ def rebuild_lookup_tables(conn, log=None, cancel=None, bundeslaender=None):
     if states is not None and not _lookup_structure_current(conn):
         states = None
     if log:
-        try:
+        with contextlib.suppress(Exception):
             log('Suchverzeichnis wird aktualisiert …' if states else
                 'Suchverzeichnis wird aktualisiert (bei der bundesweiten '
                 'Datenbank zwei bis drei Minuten) …')
-        except Exception:
-            pass
 
     def check():
         if cancel is not None and cancel():
@@ -638,14 +631,12 @@ def rebuild_lookup_tables(conn, log=None, cancel=None, bundeslaender=None):
     except BaseException as e:
         if cancel is not None:
             conn.set_progress_handler(None, 0)   # must not interrupt the rollback
-        try:
+        with contextlib.suppress(Exception):
             if own_tx:
                 conn.rollback()
             else:
                 conn.execute('ROLLBACK TO rebuild_lookup')
                 conn.execute('RELEASE rebuild_lookup')
-        except Exception:
-            pass
         if (not isinstance(e, RebuildCancelled) and isinstance(e, sqlite3.OperationalError)
                 and cancel is not None and cancel()):
             raise RebuildCancelled() from e      # statement interrupted by cancel
@@ -677,6 +668,26 @@ def _lookup_structure_current(conn):
         return False
 
 
+_GEMEINDE_AGG_ALL = (
+    "SELECT gemeinde_norm, bundesland, gemeinde, epsg, COUNT(*), "
+    "       AVG(x), AVG(y), SUM(CASE WHEN plz IS NULL OR plz = '' THEN 1 ELSE 0 END) "
+    "FROM addresses GROUP BY 1, 2, 3, 4")
+_GEMEINDE_AGG_STATES = (
+    "SELECT gemeinde_norm, bundesland, gemeinde, epsg, COUNT(*), "
+    "       AVG(x), AVG(y), SUM(CASE WHEN plz IS NULL OR plz = '' THEN 1 ELSE 0 END) "
+    "FROM addresses WHERE bundesland IN (SELECT bundesland FROM rebuild_states) "
+    "GROUP BY 1, 2, 3, 4")
+_KREIS_AGG_ALL = (
+    "SELECT kreis, gemeinde_norm, bundesland, COUNT(*) FROM addresses "
+    "WHERE kreis IS NOT NULL AND kreis <> '' AND gemeinde_norm <> '' "
+    "GROUP BY 1, 2, 3")
+_KREIS_AGG_STATES = (
+    "SELECT kreis, gemeinde_norm, bundesland, COUNT(*) FROM addresses "
+    "WHERE kreis IS NOT NULL AND kreis <> '' AND gemeinde_norm <> '' "
+    "AND bundesland IN (SELECT bundesland FROM rebuild_states) "
+    "GROUP BY 1, 2, 3")
+
+
 def _rebuild_lookup_body(conn, check, states=None):
     """states None: build all tables from scratch; otherwise replace only the
     rows of these states (the tables exist in the current structure)."""
@@ -695,22 +706,25 @@ def _rebuild_lookup_body(conn, check, states=None):
             "CREATE TABLE lookup_meta (key TEXT PRIMARY KEY, value TEXT)",
         ):
             conn.execute(stmt)
-        where, params = '', ()
     else:
-        marks = ','.join('?' * len(states))
-        for table in ('gemeinde_index', 'ortsteil_index', 'bundesland_index'):
-            conn.execute(f"DELETE FROM {table} WHERE bundesland IN ({marks})", states)
-        where, params = f"WHERE bundesland IN ({marks}) ", tuple(states)
+        # The states to renew go into a temporary table, so that all statements
+        # are fixed SQL texts (no SQL assembled from strings)
+        conn.execute("CREATE TEMP TABLE IF NOT EXISTS rebuild_states (bundesland TEXT PRIMARY KEY)")
+        conn.execute("DELETE FROM rebuild_states")
+        conn.executemany("INSERT INTO rebuild_states VALUES (?)", [(s,) for s in states])
+        conn.execute("DELETE FROM gemeinde_index "
+                     "WHERE bundesland IN (SELECT bundesland FROM rebuild_states)")
+        conn.execute("DELETE FROM ortsteil_index "
+                     "WHERE bundesland IN (SELECT bundesland FROM rebuild_states)")
+        conn.execute("DELETE FROM bundesland_index "
+                     "WHERE bundesland IN (SELECT bundesland FROM rebuild_states)")
     check()
 
     # One scan yields the Gemeinde directory AND the PLZ coverage per Bundesland
     # (rows without a Gemeinde count towards coverage too). Deliberately NO
     # coalesce() in the GROUP BY: it prevents index access via idx_gem_str
     # and took about 270 instead of 165 seconds on 21 million addresses.
-    rows = conn.execute(
-        "SELECT gemeinde_norm, bundesland, gemeinde, epsg, COUNT(*), "
-        "       AVG(x), AVG(y), SUM(CASE WHEN plz IS NULL OR plz = '' THEN 1 ELSE 0 END) "
-        f"FROM addresses {where}GROUP BY 1, 2, 3, 4", params).fetchall()
+    rows = conn.execute(_GEMEINDE_AGG_ALL if states is None else _GEMEINDE_AGG_STATES).fetchall()
     check()
     _insert_chunked(conn, "INSERT INTO gemeinde_index VALUES (?,?,?,?,?,?,?,?)",
                     [(gn, _kurz_norm(gn), bl, g, n, cx, cy, e)
@@ -724,11 +738,7 @@ def _rebuild_lookup_body(conn, check, states=None):
                      [(bl, n, o) for bl, (n, o) in bl_agg.items()])
     check()
 
-    rows = conn.execute(
-        "SELECT kreis, gemeinde_norm, bundesland, COUNT(*) FROM addresses "
-        "WHERE kreis IS NOT NULL AND kreis <> '' AND gemeinde_norm <> '' "
-        + (where.replace('WHERE', 'AND') if where else '')
-        + "GROUP BY 1, 2, 3", params).fetchall()
+    rows = conn.execute(_KREIS_AGG_ALL if states is None else _KREIS_AGG_STATES).fetchall()
     check()
     agg = {}
     alias_cache = {}
@@ -823,18 +833,14 @@ def ensure_lookup_tables(log=None, cancel=None):
             rebuild_lookup_tables(conn, log, cancel)
             conn.commit()
         except Exception:
-            try:
+            with contextlib.suppress(Exception):
                 conn.rollback()
-            except Exception:
-                pass
             _lookup_available[DB_PATH] = _lookup_compatible(conn)
             return False
         _lookup_checked = True
         if log:
-            try:
+            with contextlib.suppress(Exception):
                 log('Suchverzeichnis aktualisiert.')
-            except Exception:
-                pass
         return True
     finally:
         conn.close()
@@ -1019,13 +1025,11 @@ def get_db_stats(db_path=None):
         conn.row_factory = sqlite3.Row
         # An index on bundesland speeds up GROUP BY considerably. Create it
         # once if not yet present (idempotent, IF NOT EXISTS).
-        try:
+        with contextlib.suppress(Exception):
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_bundesland "
                 "ON addresses(bundesland)")
             conn.commit()
-        except Exception:
-            pass
         rows = conn.execute(
             "SELECT bundesland, COUNT(*) AS n FROM addresses "
             "GROUP BY bundesland ORDER BY bundesland"
@@ -1040,6 +1044,23 @@ def get_db_stats(db_path=None):
 
 SOURCE_META_FIELDS = ('quelle', 'url', 'etag', 'last_modified', 'sha256', 'dateien',
                       'heruntergeladen_am', 'importiert_am', 'adressen')
+
+
+_SOURCE_META_UPSERT = """
+    INSERT INTO source_meta (bundesland, quelle, url, etag, last_modified, sha256, dateien,
+                             heruntergeladen_am, importiert_am, adressen)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(bundesland) DO UPDATE SET
+        quelle             = CASE WHEN ? THEN excluded.quelle             ELSE quelle END,
+        url                = CASE WHEN ? THEN excluded.url                ELSE url END,
+        etag               = CASE WHEN ? THEN excluded.etag               ELSE etag END,
+        last_modified      = CASE WHEN ? THEN excluded.last_modified      ELSE last_modified END,
+        sha256             = CASE WHEN ? THEN excluded.sha256             ELSE sha256 END,
+        dateien            = CASE WHEN ? THEN excluded.dateien            ELSE dateien END,
+        heruntergeladen_am = CASE WHEN ? THEN excluded.heruntergeladen_am ELSE heruntergeladen_am END,
+        importiert_am      = CASE WHEN ? THEN excluded.importiert_am      ELSE importiert_am END,
+        adressen           = CASE WHEN ? THEN excluded.adressen           ELSE adressen END
+"""
 
 
 def ensure_source_meta(conn):
@@ -1175,13 +1196,11 @@ def save_source_meta(bundesland, db_path=None, **fields):
     conn = sqlite3.connect(path)
     try:
         ensure_source_meta(conn)
-        cols = [k for k in SOURCE_META_FIELDS if k in fields]
-        conn.execute(
-            "INSERT INTO source_meta (bundesland" + ''.join(f', {c}' for c in cols) + ") "
-            "VALUES (?" + ', ?' * len(cols) + ") "
-            "ON CONFLICT(bundesland) DO UPDATE SET "
-            + ', '.join(f'{c} = excluded.{c}' for c in cols),
-            [bundesland] + [fields[c] for c in cols])
+        # Fixed SQL; per column a flag says whether the call sets it (columns
+        # not given keep their value)
+        conn.execute(_SOURCE_META_UPSERT,
+                     [bundesland] + [fields.get(c) for c in SOURCE_META_FIELDS]
+                     + [c in fields for c in SOURCE_META_FIELDS])
         conn.commit()
     finally:
         conn.close()
@@ -1270,11 +1289,9 @@ def diagnose_search(strasse, plz='', gemeinde='', bundesland=None, conn=None,
         return 'Keine ausreichend ähnliche Adresse gefunden'
     except Exception as e:
         if detail:
-            try:
+            with contextlib.suppress(Exception):
                 detail(f'Diagnose für „{strasse}, {plz} {gemeinde}“ fehlgeschlagen: '
                        f'{type(e).__name__}: {e}')
-            except Exception:
-                pass
         if _is_locked_error(e):
             return 'Ursache nicht ermittelbar: Datenbank gesperrt (Import läuft)'
         if isinstance(e, sqlite3.Error):
@@ -1504,8 +1521,9 @@ def _search(conn, strasse, hausnummer, plz, gemeinde, bundesland,
         # many house numbers from pushing the exactly matching street out of
         # the row limit (e.g. "Karl-Marx-Allee" otherwise returned
         # "Karl-Lade-Straße"). Distinct street names are few even in large cities.
+        # nosec: built only from constant fragments; all values are ? parameters
         street_rows = conn.execute(
-            "SELECT DISTINCT strasse_norm FROM addresses WHERE 1=1"
+            "SELECT DISTINCT strasse_norm FROM addresses WHERE 1=1"  # nosec B608
             + loc_sql + str_sql + " LIMIT 5000",
             loc_params + str_params).fetchall()
         ranked = []
@@ -1532,8 +1550,9 @@ def _search(conn, strasse, hausnummer, plz, gemeinde, bundesland,
         if plz_n:
             order_sql += ", CASE WHEN plz = ? THEN 0 ELSE 1 END"
             order_params.append(plz_n)
+        # nosec: built only from constant fragments; all values are ? parameters
         return conn.execute(
-            "SELECT * FROM addresses WHERE 1=1" + loc_sql
+            "SELECT * FROM addresses WHERE 1=1" + loc_sql  # nosec B608
             + f" AND strasse_norm IN ({ph})" + order_sql + " LIMIT 1500",
             loc_params + top_streets + order_params).fetchall()
 

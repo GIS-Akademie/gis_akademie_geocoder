@@ -26,6 +26,7 @@ Two computation paths with the same interface (lookup(x, y, epsg) -> PLZ or ''):
                     without QGIS (GeoJSON only), considerably slower.
 """
 
+import contextlib
 import os
 import re
 import gzip
@@ -73,11 +74,9 @@ def attr_text(val):
     Whole-number floats (12.0) lose the '.0'."""
     if val is None:
         return ''
-    try:
+    with contextlib.suppress(Exception):
         if hasattr(val, 'isNull') and val.isNull():
             return ''
-    except Exception:
-        pass
     if isinstance(val, float):
         if val != val:                      # NaN
             return ''
@@ -172,10 +171,8 @@ def _source_mtimes(path):
         files.append(path + '-wal')
     out = []
     for f in files:
-        try:
+        with contextlib.suppress(OSError):
             out.append(int(os.path.getmtime(f)))
-        except OSError:
-            pass
     return out
 
 
@@ -522,6 +519,21 @@ def build_resolver_logged(source=None, plz_field="plz", layer_name=None, log=Non
 
 # ── Post-processing: PLZ for already imported addresses ──────────────────────
 
+# (count, select) per kind of rows of the post-pass — fixed SQL texts
+_GAP_SQL = (
+    ("SELECT COUNT(*) FROM addresses WHERE plz = '' AND bundesland = ?",
+     "SELECT id, x, y, epsg, plz, plz_herkunft FROM addresses WHERE plz = '' AND bundesland = ?"),
+    ("SELECT COUNT(*) FROM addresses WHERE plz IS NULL AND bundesland = ?",
+     "SELECT id, x, y, epsg, plz, plz_herkunft FROM addresses WHERE plz IS NULL AND bundesland = ?"),
+)
+_RECOMPUTE_SQL = (
+    ("SELECT COUNT(*) FROM addresses "
+     "WHERE bundesland = ? AND plz_herkunft = 'gebiet' AND plz <> ''",
+     "SELECT id, x, y, epsg, plz, plz_herkunft FROM addresses "
+     "WHERE bundesland = ? AND plz_herkunft = 'gebiet' AND plz <> ''"),
+)
+
+
 def ergaenze_plz(db_path, bundeslaender=None, log=None, detail=None, progress=None,
                  cancel=None):
     """Fill in missing PLZ in the database from the postcode areas.
@@ -558,12 +570,10 @@ def ergaenze_plz(db_path, bundeslaender=None, log=None, detail=None, progress=No
             # from areas yet — then the (index-backed) gaps are sufficient.
             old_key = meta.get(bl)
             recompute = bool(old_key) and old_key != src['key']
-            conds = ["plz = '' AND bundesland = ?", "plz IS NULL AND bundesland = ?"]
-            if recompute:
-                # first, so that the gaps filled below are not computed twice
-                conds.insert(0, "bundesland = ? AND plz_herkunft = 'gebiet' AND plz <> ''")
-            total = sum(conn.execute(f"SELECT COUNT(*) FROM addresses WHERE {c}",
-                                     (bl,)).fetchone()[0] for c in conds)
+            # recomputation first, so that the gaps filled below are not computed twice
+            queries = (_RECOMPUTE_SQL if recompute else ()) + _GAP_SQL
+            total = sum(conn.execute(count_sql, (bl,)).fetchone()[0]
+                        for count_sql, _select in queries)
             if not total:
                 if old_key != src['key']:   # remember the version so it is not re-checked every time
                     _lc.record_plz_meta(conn, bl, {'layer': src['name'], 'feld': src['field'],
@@ -581,9 +591,8 @@ def ergaenze_plz(db_path, bundeslaender=None, log=None, detail=None, progress=No
             n_new, n_upd, done, cancelled = 0, 0, 0, False
             # Streamed in chunks (a whole state would need up to ~2 GB in QGIS);
             # only rows already read are updated, so the scan is not disturbed.
-            for cond in conds:
-                cur = conn.execute("SELECT id, x, y, epsg, plz, plz_herkunft FROM addresses "
-                                   f"WHERE {cond}", (bl,))
+            for _count, select_sql in queries:
+                cur = conn.execute(select_sql, (bl,))
                 while True:
                     chunk = cur.fetchmany(_NACHLAUF_CHUNK)
                     if not chunk:

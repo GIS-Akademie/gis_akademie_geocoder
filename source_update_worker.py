@@ -23,6 +23,7 @@ end users), detail(str) for technical details (QGIS message log),
 finished(bool, str).
 """
 
+import contextlib
 import os
 import json
 import shutil
@@ -102,10 +103,8 @@ class SourceUpdateWorker(QObject):
     def cancel(self):
         self._cancelled = True
         if self._current is not None:
-            try:
+            with contextlib.suppress(Exception):
                 self._current.cancel()
-            except Exception:
-                pass
 
     def _is_cancelled(self):
         return self._cancelled
@@ -344,10 +343,8 @@ class SourceUpdateWorker(QObject):
         size = 0
         for root, _dirs, files in os.walk(cache):
             for f in files:
-                try:
+                with contextlib.suppress(OSError):
                     size += os.path.getsize(os.path.join(root, f))
-                except OSError:
-                    pass
         shutil.rmtree(cache, ignore_errors=True)
         self.detail.emit(f'{bl}: Temporäre Download-Dateien gelöscht ({_n(size / 1e6)} MB, {cache}).')
 
@@ -422,10 +419,8 @@ class SourceUpdateWorker(QObject):
                                            cancel=self._is_cancelled, seen=seen,
                                            progress=self._emit_progress, detail=self.detail.emit)
                     finally:
-                        try:
+                        with contextlib.suppress(OSError):
                             os.remove(info['path'])
-                        except OSError:
-                            pass
                     for k in summe:
                         summe[k] += st.get(k, 0)
                     self.log.emit(f'{kreis}: {_n(st["adressen"])} Adressen')
@@ -443,10 +438,8 @@ class SourceUpdateWorker(QObject):
         except AlkisConvertError as e:
             return False, str(e)
         finally:
-            try:
+            with contextlib.suppress(OSError):
                 os.remove(txt)
-            except OSError:
-                pass
 
     def _import_osm(self, bl, files, entry):
         """Convert OpenStreetMap extract(s) into an HK-BY file and load it with

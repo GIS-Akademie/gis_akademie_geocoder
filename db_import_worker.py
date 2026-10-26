@@ -15,6 +15,7 @@ module-level helpers.
 """
 
 
+import contextlib
 import codecs
 import os
 import re
@@ -235,15 +236,13 @@ def _detect_delimiter(filepath):
     standard) or ',' (CSV variant such as Hessen's 'Hauskoordinaten ohne
     Postalische Angaben'). Decided by frequency in the first non-empty
     record."""
-    try:
+    with contextlib.suppress(OSError):
         with _open_text(filepath) as f:
             for line in f:
                 line = line.strip()
                 if not line:
                     continue
                 return ';' if line.count(';') >= line.count(',') else ','
-    except OSError:
-        pass
     return ';'
 
 
@@ -520,16 +519,12 @@ class AddressSink:
 
     def rollback(self):
         self.batch = []
-        try:
+        with contextlib.suppress(sqlite3.Error):
             self.conn.rollback()
-        except sqlite3.Error:
-            pass
 
     def close(self):
-        try:
+        with contextlib.suppress(sqlite3.Error):
             self.conn.close()
-        except sqlite3.Error:
-            pass
 
     def finish(self, resolver=None, no_addresses=None):
         """End sequence: checks, PLZ message/meta, optional index, ONE commit.
@@ -751,7 +746,7 @@ class DbImportWorker(QObject):
         col, _label, min_cols = _FORMATS.get(fmt, _FORMATS['hkde'])
         results = []
         delim = _detect_delimiter(filepath)
-        try:
+        with contextlib.suppress(OSError):
             with _open_text(filepath) as f:
                 for parts in _iter_parts(f, delim):
                     if len(parts) < min_cols:
@@ -781,8 +776,6 @@ class DbImportWorker(QObject):
                     })
                     if len(results) >= n_lines:
                         break
-        except OSError:
-            pass
         return results
 
 
@@ -792,13 +785,11 @@ def _detect_bundesland(filepath, col):
         return 'Saarland'
     delim = _detect_delimiter(filepath)
     idx = col['bundesland_name']
-    try:
+    with contextlib.suppress(OSError):
         with _open_text(filepath) as f:
             for parts in _iter_parts(f, delim):
                 if len(parts) > idx:
                     bl = parts[idx].strip()
                     if bl and bl.lower() not in ('land', 'bundesland', 'bl'):
                         return _canonical_bundesland(bl)
-    except OSError:
-        pass
     return 'Unbekannt'

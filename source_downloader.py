@@ -23,6 +23,7 @@ User-Agent with contact address; no shops, registrations or portals with bot
 protection (these are listed in the catalog as 'manuell').
 """
 
+import contextlib
 import os
 import re
 import json
@@ -293,6 +294,14 @@ def _valid_online_entry(bl, entry):
     validate_catalog({'sources': {bl: entry}})
 
 
+def _is_valid_online_entry(bl, entry):
+    try:
+        _valid_online_entry(bl, entry)
+    except Exception:
+        return False
+    return True
+
+
 def load_online_catalog(path=None):
     """Cached online list or None."""
     path = path or ONLINE_CATALOG_PATH
@@ -320,9 +329,7 @@ def _merge_online(cat, online):
         return
     ersetzt = []
     for bl, entry in online['sources'].items():
-        try:
-            _valid_online_entry(bl, entry)
-        except Exception:
+        if not _is_valid_online_entry(bl, entry):
             continue
         entry = {k: v for k, v in entry.items() if not str(k).startswith('_')}
         entry['_herkunft'] = 'standard'
@@ -517,8 +524,13 @@ class Http:
 
     def _open(self, url, headers):
         """Open the connection; returns the response or (304, headers)."""
+        if urllib.parse.urlparse(url).scheme.lower() not in ('http', 'https'):
+            raise SourceError('Es werden nur Internetadressen (http/https) abgerufen.',
+                              detail=f'Adresse abgelehnt: {url}', kind='konfiguration')
         try:
-            return urllib.request.urlopen(self._request(url, headers), timeout=self.timeout)
+            # nosec: only http/https reaches urlopen (checked above)
+            return urllib.request.urlopen(  # nosec B310
+                self._request(url, headers), timeout=self.timeout)
         except urllib.error.HTTPError as e:
             hdrs = {k.lower(): v for k, v in (e.headers or {}).items()}
             if e.code == 304:
@@ -586,10 +598,8 @@ class Http:
 
 
 def _unlink(path):
-    try:
+    with contextlib.suppress(OSError):
         os.unlink(path)
-    except OSError:
-        pass
 
 
 # ── URL resolution ───────────────────────────────────────────────────────────
@@ -729,13 +739,13 @@ def _urls_links(entry, http):
     _status, _, body = http.get(url)
     text  = body.decode('utf-8', 'replace')
     links = re.findall(entry['link_muster'], text)
-    links = [l if isinstance(l, str) else l[0] for l in links]
+    links = [m if isinstance(m, str) else m[0] for m in links]   # findall: str or groups
     if not links:
         raise SourceError(_SOURCE_CHANGED, kind='geaendert', detail=f'Kein Link passend zu '
                           f'{entry["link_muster"]!r} auf {url}')
     seen, out = set(), []
-    for l in links:
-        a = _absolute(url, l)
+    for link in links:
+        a = _absolute(url, link)
         if a not in seen:
             seen.add(a)
             out.append(a)
@@ -862,10 +872,8 @@ def extract_data_files(archive, dest_dir, muster=None, _tiefe=0, _used=None):
             with z.open(info) as src, open(target, 'wb') as dst:
                 shutil.copyfileobj(src, dst)
             if inner_zip and zipfile.is_zipfile(target):
-                try:
+                with contextlib.suppress(SourceError):
                     out.extend(extract_data_files(target, dest_dir, muster, _tiefe + 1, used))
-                except SourceError:
-                    pass
                 _unlink(target)
                 continue
             out.append(target)

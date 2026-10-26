@@ -24,6 +24,7 @@ taken over: address points, buildings (point on surface) and lines.
 Data license: ODbL 1.0, © OpenStreetMap contributors — not official.
 """
 
+import contextlib
 import os
 import re
 
@@ -196,6 +197,18 @@ class _AdminAreas:
         return ''
 
 
+def _object_xy(ogr, g, lname, tr):
+    """Representative point of an OSM object in the target system, or None."""
+    if g.GetGeometryType() not in (ogr.wkbPoint, ogr.wkbPoint25D):
+        g = g.PointOnSurface() if lname == 'multipolygons' else g.Centroid()
+        if g is None:
+            return None
+    else:
+        g = g.Clone()
+    g.Transform(tr)
+    return g.GetX(), g.GetY()
+
+
 def osm_to_hkby(pbf_path, out_path, bundesland, progress=None, cancel=None, detail=None):
     """Convert pbf_path into an HK-BY file out_path. Returns a dict with
     adressen, doppelt, gemeinde_ergaenzt, ohne_gemeinde, objekte.
@@ -229,11 +242,9 @@ def osm_to_hkby(pbf_path, out_path, bundesland, progress=None, cancel=None, deta
     src.ImportFromEPSG(4326)
     dst = osr.SpatialReference()
     dst.ImportFromEPSG(25832)
-    try:
+    with contextlib.suppress(AttributeError):
         src.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
         dst.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
-    except AttributeError:
-        pass
     tr = osr.CoordinateTransformation(src, dst)
 
     landschl = _LANDSCHL.get(bundesland, '')
@@ -305,17 +316,12 @@ def osm_to_hkby(pbf_path, out_path, bundesland, progress=None, cancel=None, deta
             g = feat.GetGeometryRef()
             if g is None:
                 continue
-            try:
-                if g.GetGeometryType() not in (ogr.wkbPoint, ogr.wkbPoint25D):
-                    g = g.PointOnSurface() if lname == 'multipolygons' else g.Centroid()
-                    if g is None:
-                        continue
-                else:
-                    g = g.Clone()
-                g.Transform(tr)
-                x, y = g.GetX(), g.GetY()
-            except Exception:
+            xy = None
+            with contextlib.suppress(Exception):   # broken geometry: object is skipped
+                xy = _object_xy(ogr, g, lname, tr)
+            if xy is None:
                 continue
+            x, y = xy
             stats['objekte'] += 1
             plz = _clean(val('addr:postcode'))
             city = _clean(val('addr:city'))
@@ -343,10 +349,8 @@ def osm_to_hkby(pbf_path, out_path, bundesland, progress=None, cancel=None, deta
             for hnr, adz in numbers:
                 _emit(fh, oid, name, ott, street, hnr, adz, x, y, plz)
     ds = None
-    try:
+    with contextlib.suppress(OSError):
         os.remove(cfg)
-    except OSError:
-        pass
     if progress:
         progress(100, 100, 'OpenStreetMap-Daten umgewandelt.')
     _detail(f'OSM-Umwandlung: {stats}')

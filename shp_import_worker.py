@@ -23,6 +23,7 @@ This worker:
 All files of one worker are imported in ONE transaction (AddressSink).
 """
 
+import contextlib
 import os
 
 from qgis.PyQt.QtCore import QObject, pyqtSignal
@@ -61,29 +62,23 @@ def _representative_point(geom):
 
     if geom_type == QgsWkbTypes.PointGeometry:
         # Multi-point possible → asPoint() fails, then take a vertex
-        try:
+        with contextlib.suppress(Exception):
             pt = geom.asPoint()
             return (pt.x(), pt.y())
-        except Exception:
-            pass
 
     # Polygon/line (building outlines) or fallback: point on surface
-    try:
+    with contextlib.suppress(Exception):
         pos = geom.pointOnSurface()
         if pos is not None and not pos.isEmpty():
             pt = pos.asPoint()
             return (pt.x(), pt.y())
-    except Exception:
-        pass
 
     # Last fallback: centroid
-    try:
+    with contextlib.suppress(Exception):
         c = geom.centroid()
         if c is not None and not c.isEmpty():
             pt = c.asPoint()
             return (pt.x(), pt.y())
-    except Exception:
-        pass
 
     return None
 
@@ -118,10 +113,8 @@ def get_layer_fields_with_error(filepath):
         layer = QgsVectorLayer(filepath, 'shp_fields', 'ogr')
         if not layer.isValid():
             err = ''
-            try:
+            with contextlib.suppress(Exception):
                 err = layer.error().message()
-            except Exception:
-                pass
             if not err:
                 err = ('OGR konnte die Datei nicht öffnen. Mögliche Ursachen: '
                        'Datei durch anderes Programm gesperrt, beschädigt, '

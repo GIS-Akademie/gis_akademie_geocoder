@@ -118,8 +118,10 @@ def set_proxies(proxies):
 
 def open_url(request, timeout):
     """urlopen honouring the proxy from the QGIS settings."""
-    handlers = [urllib.request.ProxyHandler(_PROXIES)] if _PROXIES else []
-    return urllib.request.build_opener(*handlers).open(request, timeout=timeout)
+    if _PROXIES:
+        return urllib.request.build_opener(urllib.request.ProxyHandler(_PROXIES)).open(
+            request, timeout=timeout)
+    return urllib.request.urlopen(request, timeout=timeout)
 
 
 class Cancelled(Exception):

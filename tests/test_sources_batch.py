@@ -166,7 +166,7 @@ def test_batch_update_summary_and_single_lookup_rebuild(db, monkeypatch):
 
     calls = []
     real = lg.rebuild_lookup_tables
-    monkeypatch.setattr(lg, 'rebuild_lookup_tables', lambda conn, log=None: (calls.append(1), real(conn, log)))
+    monkeypatch.setattr(lg, 'rebuild_lookup_tables', lambda conn, log=None, cancel=None: (calls.append(1), real(conn, log, cancel)))
 
     w = suw.SourceUpdateWorker(None, plugin_version='t')        # None = all automatic ones
     result = {}
@@ -221,16 +221,15 @@ def test_plz_coverage_none_for_old_schema(db):
 
 def test_record_plz_meta(db):
     conn = sqlite3.connect(db.DB_PATH)
-    info = {'layer': 'OSM_PLZ.gpkg (plz)', 'feld': 'plz', 'ergaenzt': 10, 'ohne_flaeche': 2}
-    db.record_plz_meta(conn, 'Berlin', info, replace=True)
-    db.record_plz_meta(conn, 'Berlin', dict(info, ergaenzt=5, ohne_flaeche=1), replace=False)  # append
+    info = {'layer': 'OSM_PLZ.gpkg (plz)', 'feld': 'plz', 'ergaenzt': 10, 'ohne_flaeche': 2,
+            'quelle_key': 'osm:1'}
+    db.record_plz_meta(conn, 'Berlin', info)
+    db.record_plz_meta(conn, 'Berlin', dict(info, ergaenzt=5, ohne_flaeche=1))   # new import replaces
     conn.commit()
     m = db.all_plz_meta()['Berlin']
-    assert (m['layer'], m['ergaenzt'], m['ohne_flaeche']) == ('OSM_PLZ.gpkg (plz)', 15, 3)
-    db.record_plz_meta(conn, 'Berlin', None, replace=False)        # addition without layer: kept
-    conn.commit()
-    assert 'Berlin' in db.all_plz_meta()
-    db.record_plz_meta(conn, 'Berlin', None, replace=True)         # replaced without layer: gone
+    assert (m['layer'], m['ergaenzt'], m['ohne_flaeche'], m['quelle_key']) == \
+        ('OSM_PLZ.gpkg (plz)', 5, 1, 'osm:1')
+    db.record_plz_meta(conn, 'Berlin', None)                       # import without PLZ areas: gone
     conn.commit()
     conn.close()
     assert 'Berlin' not in db.all_plz_meta()
@@ -238,11 +237,10 @@ def test_record_plz_meta(db):
 
 def test_resolver_info():
     class R:
-        def stats(self):
-            return {'matched': 7, 'missed': 1}
-    assert lg.resolver_info(None, 'x', 'plz') is None
-    assert lg.resolver_info(R(), r'C:\daten\plz.gpkg', 'plz', 'OSM_PLZ') == {
-        'layer': 'plz.gpkg (OSM_PLZ)', 'feld': 'plz', 'ergaenzt': 7, 'ohne_flaeche': 1}
+        def info(self):
+            return {'quelle_key': 'osm:1', 'ergaenzt': 7}
+    assert lg.resolver_info(None) is None
+    assert lg.resolver_info(R()) == {'quelle_key': 'osm:1', 'ergaenzt': 7}
 
 
 def test_read_helpers_do_not_create_tables(db):

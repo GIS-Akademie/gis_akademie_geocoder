@@ -951,6 +951,7 @@ class GISAkademieGeocoderDialog(QDialog, FORM_CLASS):
         self._thread.started.connect(self._worker.run)
         self._worker.progress.connect(self._on_progress)
         self._worker.result_ready.connect(self._on_results)
+        self._worker.detail.connect(self._tech_log)
         self._worker.finished.connect(self._on_finished)
         self._thread.start()
         self._update_busy_state(geocoding_running=True)
@@ -974,6 +975,11 @@ class GISAkademieGeocoderDialog(QDialog, FORM_CLASS):
         self._thread.quit()
         self._thread.wait()
         self._update_busy_state(geocoding_running=False)
+        abort = getattr(self._worker, 'abort_reason', '') if self._worker is not None else ''
+        if abort:
+            # e.g. the database is locked by an import running in another QGIS
+            self._log(f'⚠ {abort}')
+            QMessageBox.warning(self, 'Geocodierung beendet', abort)
         if not self._results:
             self._log('Keine Ergebnisse.')
             return
@@ -1009,13 +1015,13 @@ class GISAkademieGeocoderDialog(QDialog, FORM_CLASS):
         gpkg_path  = self.le_gpkg.text().strip()
         layer_name = self.le_layer_name.text().strip()
         split      = self.cb_split_unfound.isChecked()
-        if self._cancel_requested and len(self._results) < len(self._rows):
+        if (self._cancel_requested or abort) and len(self._results) < len(self._rows):
             # A cancelled run never overwrites a (complete) layer of the same name
             layer_name = self._free_layer_name(gpkg_path, f'{layer_name}_teil')
             ans = QMessageBox.question(
-                self, 'Geocodierung abgebrochen',
+                self, 'Geocodierung nicht vollständig',
                 f'Die Geocodierung wurde nach {len(self._results)} von {len(self._rows)} Adressen '
-                f'abgebrochen.\nTeilergebnis als Layer „{layer_name}“ speichern?',
+                f'beendet.\nTeilergebnis als Layer „{layer_name}“ speichern?',
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                 QMessageBox.StandardButton.Yes)
             if ans != QMessageBox.StandardButton.Yes:

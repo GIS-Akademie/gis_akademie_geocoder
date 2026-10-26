@@ -435,14 +435,6 @@ def shrink_msg(n_ok, prev):
             'trotzdem übernehmen.')
 
 
-def _resolver_info(resolver):
-    """PLZ meta info of the resolver (ResolverSession of the active source)."""
-    if resolver is None:
-        return None
-    try:
-        return _lc.resolver_info(resolver)
-    except TypeError:       # older local_geocoder: source/field still required
-        return _lc.resolver_info(resolver, None, None)
 
 
 class AddressSink:
@@ -562,7 +554,7 @@ class AddressSink:
                 self._log(f"PLZ ergänzt für {_n(st['matched'])} Adressen"
                           + (f"; {_n(st['missed'])} liegen außerhalb der PLZ-Flächen."
                              if st['missed'] else '.'))
-        info = _resolver_info(resolver)
+        info = _lc.resolver_info(resolver)
         for bl in self.states:
             _lc.record_plz_meta(self.conn, bl, info, self.replace)
         # Municipality/locality index for the new data (part of the same

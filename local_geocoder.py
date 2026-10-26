@@ -1099,25 +1099,19 @@ def refresh_plz_coverage(conn, bundesland):
                  (ohne, bundesland))
 
 
-def record_plz_meta(conn, bundesland, info, replace):
-    """Record the PLZ completion of an import (inside its transaction,
-    without commit). info = dict(layer, feld, ergaenzt, ohne_flaeche) or None
-    (import without PLZ layer). A replacing import without a layer deletes the
-    old entry — the completion is then no longer part of the data.
-    An appending import (replace=False) adds up the counters."""
+def record_plz_meta(conn, bundesland, info, replace=True):
+    """Record which PLZ areas filled the state's postcodes (inside the import
+    transaction, without commit). Every import replaces a state completely, so
+    the entry is simply replaced; without PLZ areas (info None) it is removed.
+    Only quelle_key is evaluated (plz_resolver: recompute after new areas);
+    layer/feld/counters are kept as information for support."""
     ensure_plz_meta(conn)
     if info is None:
-        if replace:
-            conn.execute("DELETE FROM plz_meta WHERE bundesland = ?", (bundesland,))
+        conn.execute("DELETE FROM plz_meta WHERE bundesland = ?", (bundesland,))
         return
     from datetime import datetime
     am  = datetime.now().isoformat(timespec='seconds')
-    old = conn.execute("SELECT ergaenzt, ohne_flaeche FROM plz_meta WHERE bundesland = ?",
-                       (bundesland,)).fetchone()
     erg, ohne = int(info.get('ergaenzt') or 0), int(info.get('ohne_flaeche') or 0)
-    if old and not replace:
-        erg  += old[0] or 0
-        ohne += old[1] or 0
     conn.execute("INSERT OR REPLACE INTO plz_meta "
                  "(bundesland, layer, feld, ergaenzt, ohne_flaeche, am, quelle_key) "
                  "VALUES (?,?,?,?,?,?,?)",
@@ -1125,21 +1119,10 @@ def record_plz_meta(conn, bundesland, info, replace):
                   info.get('quelle_key')))
 
 
-def resolver_info(resolver, source=None, field=None, layername=None):
-    """Helper for the import workers: PLZ meta info from a resolver. The
-    resolvers of plz_resolver (ResolverSession) describe themselves via
-    info(); source/field/layername are only used for a resolver without
-    info() (legacy callers) and may be omitted: resolver_info(resolver)."""
-    if resolver is None:
-        return None
-    if hasattr(resolver, 'info'):           # ResolverSession (plz_resolver)
-        return resolver.info()
-    st = resolver.stats()
-    name = os.path.basename(source or '')
-    if layername:
-        name += f' ({layername})'
-    return {'layer': name, 'feld': field or '', 'ergaenzt': st.get('matched', 0),
-            'ohne_flaeche': st.get('missed', 0)}
+def resolver_info(resolver, *_legacy):
+    """Helper for the import workers: PLZ meta info of a resolver
+    (plz_resolver.ResolverSession.info()) or None without resolver."""
+    return resolver.info() if resolver is not None else None
 
 
 def all_plz_meta(db_path=None):

@@ -10,6 +10,8 @@ import re
 
 from qgis.PyQt.QtCore import QObject, pyqtSignal
 
+from . import source_downloader as _sd
+
 import os
 
 from .local_geocoder import (search as local_search, db_state, normalize,
@@ -628,7 +630,7 @@ class GeocoderWorker(QObject):
             'User-Agent': f'QGIS-GISAkademieGeocoderPlugin/{PLUGIN_VERSION} '
                           '(wieschmann@gis-akademie.de)'
         })
-        with urllib.request.urlopen(req, timeout=10) as resp:
+        with _sd.open_url(req, 10) as resp:          # honours the QGIS proxy
             data = json.loads(resp.read().decode('utf-8'))
         if not data:
             return self._empty_result()

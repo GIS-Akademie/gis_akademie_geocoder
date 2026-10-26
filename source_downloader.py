@@ -26,9 +26,11 @@ protection (these are listed in the catalog as 'manuell').
 import os
 import re
 import json
+import html
 import shutil
 import hashlib
 import zipfile
+import http.client
 import urllib.request
 import urllib.parse
 import urllib.error
@@ -82,7 +84,42 @@ MANUAL_TYPE     = 'manuell'
 FORMATS         = ('hkde', 'gml', 'shp', 'osm', 'alkis', 'geojson')
 # osm: OpenStreetMap extract (.osm.pbf); alkis: ALKIS GeoPackage with buildings and land parcels
 
+# Data formats each fetch type can deliver to the import — the single place
+# that validation, the source editor and the online list check against.
+_FILE_FORMATS = ('hkde', 'gml', 'shp', 'osm')
+TYPE_FORMATS = {
+    'datei':         _FILE_FORMATS,
+    'direct':        _FILE_FORMATS,
+    'index_json':    _FILE_FORMATS,
+    'page_link':     _FILE_FORMATS,
+    'atom':          _FILE_FORMATS,
+    'rss':           _FILE_FORMATS,
+    'ckan':          _FILE_FORMATS,
+    'wfs':           ('gml',),
+    'index_geojson': ('alkis',),
+    'gaialight':     ('hkde', 'gml', 'shp'),
+    'ogcapi':        ('geojson',),
+    'manuell':       FORMATS,
+}
+
 CHUNK = 1024 * 256
+
+DEFAULT_USER_AGENT = 'QGIS-GISAkademieGeocoder/{version} (+https://gis-akademie.de)'
+
+# Proxy from the QGIS network settings ({'http': url, 'https': url}); set by the
+# plugin before network work starts. None = urllib default (environment/system).
+_PROXIES = None
+
+
+def set_proxies(proxies):
+    global _PROXIES
+    _PROXIES = dict(proxies) if proxies else None
+
+
+def open_url(request, timeout):
+    """urlopen honouring the proxy from the QGIS settings."""
+    handlers = [urllib.request.ProxyHandler(_PROXIES)] if _PROXIES else []
+    return urllib.request.build_opener(*handlers).open(request, timeout=timeout)
 
 
 class Cancelled(Exception):
@@ -92,11 +129,15 @@ class Cancelled(Exception):
 class SourceError(Exception):
     """Source not retrievable / catalog invalid. str(e) is worded for end
     users; e.detail contains technical details (URL, pattern …) for the
-    QGIS message log."""
+    QGIS message log. e.kind: 'voruebergehend' (network, server busy or in
+    maintenance – try again later), 'geaendert' (file no longer there – the
+    source has probably changed), 'konfiguration' (the catalog entry does not
+    fit the service) or 'fehler'."""
 
-    def __init__(self, message, detail=None):
+    def __init__(self, message, detail=None, kind='fehler'):
         super().__init__(message)
         self.detail = detail
+        self.kind = kind
 
 
 def _n(x):
@@ -123,25 +164,35 @@ def _host(url):
 
 def _http_error(code, url):
     host = _host(url)
-    if code == 404:
+    kind = 'fehler'
+    if code in (404, 410):
         msg = (f'Die Datei ist auf dem Server {host} nicht (mehr) vorhanden – die Quelle hat '
                'sich vermutlich geändert. Bitte im Reiter „Datenbank & Quellen“ prüfen oder der '
                'GIS-Akademie melden.')
+        kind = 'geaendert'
     elif code in (401, 403):
         msg = f'Der Server {host} verweigert den Zugriff (Fehler {code}).'
+        kind = 'geaendert'
     elif code == 429:
         msg = f'Der Server {host} meldet zu viele Anfragen. Bitte später erneut versuchen.'
+        kind = 'voruebergehend'
     elif code >= 500:
         msg = f'Der Server {host} ist derzeit gestört (Fehler {code}). Bitte später erneut versuchen.'
+        kind = 'voruebergehend'
     else:
         msg = f'Der Server {host} meldet Fehler {code}.'
-    return SourceError(msg, detail=f'HTTP {code} bei {url}')
+    return SourceError(msg, detail=f'HTTP {code} bei {url}', kind=kind)
 
 
 def _net_error(url, reason):
     return SourceError(f'Keine Verbindung zum Server {_host(url)}. Bitte die Internetverbindung '
                        'prüfen und später erneut versuchen.',
-                       detail=f'Netzwerkfehler bei {url}: {reason}')
+                       detail=f'Netzwerkfehler bei {url}: {reason}', kind='voruebergehend')
+
+
+# Errors while connecting or while reading the response body (timeouts,
+# connection resets, truncated responses) — urllib only wraps some of them.
+_NET_ERRORS = (OSError, http.client.HTTPException)
 
 
 # ── Catalog ──────────────────────────────────────────────────────────────────
@@ -170,12 +221,7 @@ def _write_user_catalog(sources, path=None):
     path = path or USER_CATALOG_PATH
     if not path:
         raise SourceError('Kein Speicherort für eigene Quellen gesetzt.')
-    os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
-    tmp = path + '.tmp'
-    with open(tmp, 'w', encoding='utf-8', newline='\n') as f:
-        json.dump({'version': 1, 'sources': sources}, f, ensure_ascii=False, indent=2)
-        f.write('\n')
-    os.replace(tmp, path)
+    _write_json(path, {'version': 1, 'sources': sources})
 
 
 def save_user_source(bundesland, entry, path=None):
@@ -202,15 +248,30 @@ def _iso_date(value):
     return value if isinstance(value, str) and re.match(r'^\d{4}-\d{2}-\d{2}$', value) else ''
 
 
+def _schema_version(value):
+    """Catalog format version as int ('1', 1, '1.0' → 1); unreadable → treated
+    as too new, so that an unexpected list is never used."""
+    try:
+        return int(float(str(value if value not in (None, '') else 1)))
+    except (TypeError, ValueError):
+        return CATALOG_SCHEMA + 1
+
+
 def _valid_online_entry(bl, entry):
     """Check an entry of an online list: valid as in the bundled catalog,
     but only internet sources or "manuell" and only http(s) URLs — a list
-    from the internet must never point to files on this computer."""
+    from the internet must never point to files on this computer (neither
+    the main source nor the fallback source)."""
     if not isinstance(entry, dict) or entry.get('typ') == FILE_TYPE:
         raise SourceError(f'{bl}: Typ in der Online-Liste nicht erlaubt')
-    url = str(entry.get('url', ''))
-    if not url.lower().startswith(('https://', 'http://')):
-        raise SourceError(f'{bl}: keine http(s)-Adresse')
+    for e in (entry, entry.get('ausweich') or {}):
+        if e is not entry and not e:
+            continue
+        if not isinstance(e, dict) or e.get('typ') == FILE_TYPE:
+            raise SourceError(f'{bl}: Typ in der Online-Liste nicht erlaubt')
+        url = str(e.get('url', ''))
+        if not url.lower().startswith(('https://', 'http://')):
+            raise SourceError(f'{bl}: keine http(s)-Adresse')
     validate_catalog({'sources': {bl: entry}})
 
 
@@ -235,7 +296,7 @@ def _merge_online(cat, online):
     stand_on, stand_mit = _iso_date(online.get('stand')), _iso_date(cat.get('stand'))
     if not stand_on or stand_on <= stand_mit:
         return
-    if int(online.get('version', 1) or 1) > CATALOG_SCHEMA:
+    if _schema_version(online.get('version')) > CATALOG_SCHEMA:
         cat['_fehler'].append('Die online verfügbare Quellenliste braucht eine neuere Version des '
                               'Plugins — es gilt die mitgelieferte Liste.')
         return
@@ -305,6 +366,9 @@ def validate_catalog(cat):
             raise SourceError(f'{bl}: unbekannter typ {typ!r}')
         if e.get('format') not in FORMATS:
             raise SourceError(f'{bl}: unbekanntes format {e.get("format")!r}')
+        if e['format'] not in TYPE_FORMATS[typ]:
+            raise SourceError(f'{bl}: Das Datenformat {e["format"]!r} passt nicht zur Bezugsart '
+                              f'{TYPE_LABELS.get(typ, typ)!r}.')
         if typ == FILE_TYPE:
             if not e.get('pfad'):
                 raise SourceError(f'{bl}: Bitte eine Datei auswählen.')
@@ -350,9 +414,15 @@ def validate_catalog(cat):
                                       f'regulärer Ausdruck ({err}).')
 
 
-def source_for(bundesland, catalog=None):
-    cat = catalog or load_catalog()
-    return cat['sources'].get(bundesland)
+def user_agent(version='dev', catalog=None):
+    """User-Agent with contact address from the catalog (usage rule of the
+    data providers) — used for every request of the plugin."""
+    if catalog is None:
+        try:
+            catalog = load_catalog(include_user=False, include_online=False)
+        except Exception:
+            catalog = {}
+    return (catalog.get('user_agent') or DEFAULT_USER_AGENT).replace('{version}', version)
 
 
 def is_automatic(entry):
@@ -430,24 +500,40 @@ class Http:
         h.update(headers or {})
         return urllib.request.Request(url, headers=h)
 
-    def get(self, url, headers=None, max_bytes=None):
+    def _open(self, url, headers):
+        """Open the connection; returns the response or (304, headers)."""
         try:
-            with urllib.request.urlopen(self._request(url, headers), timeout=self.timeout) as r:
-                body = r.read(max_bytes) if max_bytes else r.read()
-                return r.status, {k.lower(): v for k, v in r.headers.items()}, body
+            return open_url(self._request(url, headers), self.timeout)
         except urllib.error.HTTPError as e:
             if e.code == 304:
-                return 304, {k.lower(): v for k, v in e.headers.items()}, b''
+                return 304, {k.lower(): v for k, v in e.headers.items()}
             raise _http_error(e.code, url) from e
         except urllib.error.URLError as e:
             raise _net_error(url, e.reason) from e
+        except _NET_ERRORS as e:
+            raise _net_error(url, e) from e
+
+    def get(self, url, headers=None, max_bytes=None):
+        r = self._open(url, headers)
+        if isinstance(r, tuple):
+            return r[0], r[1], b''
+        with r:
+            try:
+                body = r.read(max_bytes) if max_bytes else r.read()
+            except _NET_ERRORS as e:          # timeout, reset, truncated body
+                raise _net_error(url, e) from e
+            return r.status, {k.lower(): v for k, v in r.headers.items()}, body
 
     def download(self, url, dest, headers=None, progress=None, cancel=None):
         """Streams url to dest (via a temporary file). Returns
-        (status, headers_dict). On 304 nothing is written."""
+        (status, headers_dict). On 304 nothing is written. A download that
+        ends early (fewer bytes than announced) is an error — never a file."""
+        r = self._open(url, headers)
+        if isinstance(r, tuple):
+            return r
         tmp = dest + '.part'
         try:
-            with urllib.request.urlopen(self._request(url, headers), timeout=self.timeout) as r:
+            with r:
                 hdrs  = {k.lower(): v for k, v in r.headers.items()}
                 total = int(hdrs.get('content-length') or 0)
                 done  = 0
@@ -456,7 +542,10 @@ class Http:
                     while True:
                         if cancel and cancel():
                             raise Cancelled()
-                        chunk = r.read(CHUNK)
+                        try:
+                            chunk = r.read(CHUNK)
+                        except _NET_ERRORS as e:
+                            raise _net_error(url, e) from e
                         if not chunk:
                             break
                         f.write(chunk)
@@ -464,18 +553,17 @@ class Http:
                         done += len(chunk)
                         if progress:
                             progress(done, total)
+                if total and done < total:
+                    raise SourceError(
+                        f'Der Download von {_host(url)} wurde vorzeitig beendet ({_mb(done)} von '
+                        f'{_mb(total)} MB). Bitte später erneut versuchen – der bisherige Bestand '
+                        'bleibt erhalten.',
+                        detail=f'Verbindung nach {done} von {total} Bytes beendet: {url}',
+                        kind='voruebergehend')
                 hdrs['_sha256'] = sha.hexdigest()
                 hdrs['_size']   = str(done)
             os.replace(tmp, dest)
             return r.status, hdrs
-        except urllib.error.HTTPError as e:
-            _unlink(tmp)
-            if e.code == 304:
-                return 304, {k.lower(): v for k, v in e.headers.items()}
-            raise _http_error(e.code, url) from e
-        except urllib.error.URLError as e:
-            _unlink(tmp)
-            raise _net_error(url, e.reason) from e
         except BaseException:
             _unlink(tmp)
             raise
@@ -491,10 +579,8 @@ def _unlink(path):
 # ── URL resolution ───────────────────────────────────────────────────────────
 
 def _absolute(base, link):
-    return urllib.parse.urljoin(base, link.strip())
-
-
-_TEMPLATE_KEYS = ('{datum}', '{jahr}', '{nr}')
+    # Links found in HTML/Atom are entity-encoded ('&amp;' between query parameters)
+    return urllib.parse.urljoin(base, html.unescape(link.strip()))
 
 
 def url_template_candidates(url, today=None):
@@ -522,20 +608,29 @@ def url_template_candidates(url, today=None):
     return out
 
 
+def _is_html(headers):
+    return 'text/html' in str((headers or {}).get('content-type', '')).lower()
+
+
 def resolve_url_template(url, http, today=None):
-    """First reachable URL from url_template_candidates — checked by fetching
-    the first bytes (some servers do not allow HEAD requests)."""
+    """First existing URL from url_template_candidates — checked by fetching
+    the first bytes (some servers do not allow HEAD requests). A candidate
+    counts as missing on 404/403 or when the server answers with a web page
+    instead of a file; a network problem or server error ends the search at
+    once (it would affect every candidate)."""
     tried = []
     for cand in url_template_candidates(url, today):
         try:
-            status, _h, _b = http.get(cand, headers={'Range': 'bytes=0-3'}, max_bytes=4)
-        except SourceError:
+            status, h, _b = http.get(cand, headers={'Range': 'bytes=0-3'}, max_bytes=4)
+        except SourceError as e:
+            if e.kind == 'voruebergehend':
+                raise
             tried.append(cand)
             continue
-        if status in (200, 206):
+        if status in (200, 206) and not _is_html(h):
             return cand
         tried.append(cand)
-    raise SourceError(_SOURCE_CHANGED,
+    raise SourceError(_SOURCE_CHANGED, kind='geaendert',
                       detail=f'Keine der {len(tried)} Adressen erreichbar, Muster {url}')
 
 
@@ -545,7 +640,8 @@ def index_geojson_urls(entry, http):
     feld = entry.get('url_feld') or 'zip'
     _s, _h, body = http.get(entry['url'])
     try:
-        feats = json.loads(body.decode('utf-8')).get('features') or []
+        data = json.loads(body.decode('utf-8'))
+        feats = (data.get('features') if isinstance(data, dict) else None) or []
     except ValueError as e:
         raise SourceError('Die Dateiliste der Quelle ist nicht lesbar.',
                           detail=f'Index nicht lesbar: {entry["url"]}') from e
@@ -557,7 +653,7 @@ def index_geojson_urls(entry, http):
             if u not in urls:
                 urls.append(u)
     if not urls:
-        raise SourceError(_SOURCE_CHANGED, detail=f'Keine Einträge im Feld {feld!r} in {entry["url"]}')
+        raise SourceError(_SOURCE_CHANGED, kind='geaendert', detail=f'Keine Einträge im Feld {feld!r} in {entry["url"]}')
     return sorted(urls)
 
 
@@ -575,6 +671,8 @@ def resolve_download_urls(entry, http):
         status, _, body = http.get(url)
         try:
             idx = json.loads(body.decode('utf-8'))
+            if not isinstance(idx, dict):
+                raise ValueError('kein Objekt')
         except ValueError as e:
             raise SourceError('Die Dateiliste der Quelle ist nicht lesbar.',
                               detail=f'index.json nicht lesbar: {url}') from e
@@ -585,7 +683,7 @@ def resolve_download_urls(entry, http):
                 if pat.search(f.get('name', '')):
                     names.append(f['name'])
         if not names:
-            raise SourceError(_SOURCE_CHANGED, detail=f'Keine Datei passend zu '
+            raise SourceError(_SOURCE_CHANGED, kind='geaendert', detail=f'Keine Datei passend zu '
                               f'{entry["datei_muster"]!r} im Index {url}')
         return [_absolute(url, n) for n in sorted(set(names))]
 
@@ -595,7 +693,7 @@ def resolve_download_urls(entry, http):
         links = re.findall(entry['link_muster'], text)
         links = [l if isinstance(l, str) else l[0] for l in links]
         if not links:
-            raise SourceError(_SOURCE_CHANGED, detail=f'Kein Link passend zu '
+            raise SourceError(_SOURCE_CHANGED, kind='geaendert', detail=f'Kein Link passend zu '
                               f'{entry["link_muster"]!r} auf {url}')
         seen, out = set(), []
         for l in links:
@@ -611,6 +709,8 @@ def resolve_download_urls(entry, http):
         status, _, body = http.get(f'{url}?{q}')
         try:
             data = json.loads(body.decode('utf-8'))
+            if not isinstance(data, dict):
+                raise ValueError('kein Objekt')
         except ValueError as e:
             raise SourceError('Die Antwort des Datenportals ist nicht lesbar.',
                               detail=f'CKAN-Antwort nicht lesbar: {url}') from e
@@ -625,7 +725,7 @@ def resolve_download_urls(entry, http):
                     if best is None or key > best[0]:
                         best = (key, u)
         if not best:
-            raise SourceError(_SOURCE_CHANGED, detail=f'Keine CKAN-Ressource passend zu '
+            raise SourceError(_SOURCE_CHANGED, kind='geaendert', detail=f'Keine CKAN-Ressource passend zu '
                               f'{entry["ressource_muster"]!r}')
         return [best[1]]
 
@@ -646,15 +746,16 @@ def _url_key(url):
 
 
 def download_file(http, url, dest_dir, prev_meta=None, force=False,
-                  progress=None, cancel=None):
-    """Downloads url into dest_dir. prev_meta (dict with etag/last_modified of
-    the last successful processing of this URL) controls the conditional
-    request; force=True forces the download.
+                  progress=None, cancel=None, name=None):
+    """Downloads url into dest_dir (as 'name', default: the URL's file name).
+    prev_meta (dict with etag/last_modified of the last successful processing
+    of this URL) controls the conditional request; force=True forces the
+    download.
 
     Returns dict(status='ok'|'unchanged', path, etag, last_modified, size,
     sha256, url)."""
     os.makedirs(dest_dir, exist_ok=True)
-    dest = os.path.join(dest_dir, _file_name_from_url(url))
+    dest = os.path.join(dest_dir, name or _file_name_from_url(url))
     headers = {}
     if prev_meta and not force and _url_key(prev_meta.get('url')) == _url_key(url):
         if prev_meta.get('etag'):
@@ -666,12 +767,13 @@ def download_file(http, url, dest_dir, prev_meta=None, force=False,
         return {'status': 'unchanged', 'path': dest if os.path.exists(dest) else None,
                 'url': url, 'etag': prev_meta.get('etag'),
                 'last_modified': prev_meta.get('last_modified'), 'size': None, 'sha256': None}
-    if 'text/html' in str(hdrs.get('content-type', '')).lower():
+    if _is_html(hdrs):
         # Maintenance or error page instead of the file (e.g. Thüringen, status 200/206)
         _unlink(dest)
         raise SourceError(f'Der Server {_host(url)} liefert derzeit keine Datei, sondern eine '
                           'Webseite (z.B. Wartung). Bitte später erneut versuchen – der bisherige '
-                          'Bestand bleibt erhalten.', detail=f'text/html statt Datei bei {url}')
+                          'Bestand bleibt erhalten.', detail=f'text/html statt Datei bei {url}',
+                          kind='voruebergehend')
     info = {'status': 'ok', 'path': dest, 'url': url,
             'etag': hdrs.get('etag'), 'last_modified': hdrs.get('last-modified'),
             'size': int(hdrs.get('_size') or 0), 'sha256': hdrs.get('_sha256')}
@@ -683,30 +785,47 @@ def download_file(http, url, dest_dir, prev_meta=None, force=False,
     return info
 
 
-def extract_data_files(archive, dest_dir, muster=None, _tiefe=0):
+def _safe_name(text):
+    return re.sub(r'[^A-Za-z0-9._-]+', '_', text).strip('_')
+
+
+def extract_data_files(archive, dest_dir, muster=None, _tiefe=0, _used=None):
     """Extracts a zip and returns the data files (regex 'muster' applied to the
     file name; without a pattern all files). A zip inside the zip (e.g. Bremen:
     GEBAEUDEADRESSEN_SHP_FHB.zip contains GEBAEUDEADRESSEN_SHP_FHB_2026_08.zip)
-    is extracted as well. Non-zip files are returned unchanged."""
+    is extracted as well. Non-zip files are returned unchanged.
+    Files are written flat (only base names — prevents zip slip); members
+    with the same name from different folders get the folder as a prefix, so
+    they never overwrite each other (shapefile parts of one folder keep a
+    common prefix)."""
     if not zipfile.is_zipfile(archive):
         return [archive]
+    used = set() if _used is None else _used
     pat = re.compile(muster, re.IGNORECASE) if muster else None
     out = []
     with zipfile.ZipFile(archive) as z:
-        for info in z.infolist():
-            if info.is_dir():
-                continue
-            base = os.path.basename(info.filename)
+        members = [i for i in z.infolist() if not i.is_dir()]
+        names = [os.path.basename(i.filename) for i in members]
+        clash = {n for n in names if names.count(n) > 1} | {n for n in names if n.lower() in used}
+        for info, base in zip(members, names):
             inner_zip = base.lower().endswith('.zip') and _tiefe < 2
             if pat and not pat.search(base) and not inner_zip:
                 continue
-            # Prevent zip slip: only the base name is used
-            target = os.path.join(dest_dir, base)
+            name = base
+            if base in clash:
+                folder = _safe_name(os.path.dirname(info.filename).replace('/', '_'))
+                name = f'{folder or "z"}__{base}'
+                k = 2
+                while name.lower() in used:
+                    name = f'{folder or "z"}{k}__{base}'
+                    k += 1
+            used.add(name.lower())
+            target = os.path.join(dest_dir, name)
             with z.open(info) as src, open(target, 'wb') as dst:
                 shutil.copyfileobj(src, dst)
             if inner_zip and zipfile.is_zipfile(target):
                 try:
-                    out.extend(extract_data_files(target, dest_dir, muster, _tiefe + 1))
+                    out.extend(extract_data_files(target, dest_dir, muster, _tiefe + 1, used))
                 except SourceError:
                     pass
                 _unlink(target)
@@ -761,12 +880,22 @@ def _de(typname):
     return _TYPE_DE.get(_local(typname), _local(typname))
 
 
+def _id_pattern(typname):
+    return re.compile(rb'<(?:\w+:)?' + _local(typname).encode() + rb'\b[^>]*?gml:id="([^"]+)"')
+
+
 def _feature_ids(path, typname):
     """gml:id of all objects of a type in a GML file (without an XML parser —
     fast even for 40 MB pages). 'Address' does not match 'AddressLocator'."""
-    pat = re.compile(rb'<(?:\w+:)?' + _local(typname).encode() + rb'\b[^>]*?gml:id="([^"]+)"')
     with open(path, 'rb') as f:
-        return pat.findall(f.read())
+        return _id_pattern(typname).findall(f.read())
+
+
+def _page_stats(path, typname):
+    """(number of wfs:member elements, gml:ids of the type) — one read per page."""
+    with open(path, 'rb') as f:
+        data = f.read()
+    return len(_MEMBER_RE.findall(data)), _id_pattern(typname).findall(data)
 
 
 def wfs_hits(http, base, typname, bbox=None):
@@ -796,7 +925,7 @@ def _check_complete(typname, found, expected, log):
         log(f'{typname}: vollständig ({_n(found)} Objekte)')
 
 
-def _fetch_paged(entry, typname, dest_dir, http, cancel, log, progress, expected):
+def _fetch_paged(entry, typname, dest_dir, http, cancel, log, progress, expected, shas=None):
     count = int(entry.get('seitengroesse', 10000))
     safe  = typname.replace(':', '_')
     files, ids = [], set()
@@ -805,27 +934,34 @@ def _fetch_paged(entry, typname, dest_dir, http, cancel, log, progress, expected
         if cancel and cancel():
             raise Cancelled()
         dest = os.path.join(dest_dir, f'{safe}_{page:04d}.gml')
-        http.download(wfs_page_url(entry['url'], typname, count, start), dest, cancel=cancel)
-        with open(dest, 'rb') as f:
-            n = len(_MEMBER_RE.findall(f.read()))
-        if n == 0:
+        _s, hdrs = http.download(wfs_page_url(entry['url'], typname, count, start), dest,
+                                 cancel=cancel)
+        n, page_ids = _page_stats(dest, typname)
+        new = set(page_ids) - ids
+        # Do NOT stop when n < count: some servers cap 'count' at their own
+        # maximum. The type ends with an empty page — or with a page that
+        # brings no new objects: a server that ignores startIndex (e.g.
+        # Brandenburg) returns the first page again and again.
+        if n == 0 or not new:
             _unlink(dest)
+            if n and log:
+                log(f'{typname}: Seite ab {start} enthält keine neuen Objekte – Ende')
             break
         files.append(dest)
-        ids.update(_feature_ids(dest, typname))
+        if shas is not None:
+            shas.append((hdrs or {}).get('_sha256') or '')
+        ids.update(new)
         if log:
             log(f'{typname}: Seite {page + 1}, {_n(n)} Objekte')
         if progress:
-            progress(start + n, expected or 0, _de(typname))
+            progress(len(ids), expected or 0, _de(typname))
         page  += 1
         start += n
-        # Do NOT stop when n < count: some servers cap 'count' at their
-        # own maximum; only an empty page ends the type.
     _check_complete(typname, len(ids), expected, log)
     return files
 
 
-def _fetch_tiled(entry, typname, dest_dir, http, cancel, log, progress, expected):
+def _fetch_tiled(entry, typname, dest_dir, http, cancel, log, progress, expected, shas=None):
     """Adaptive BBOX tiles until each tile has <= max_objekte hits."""
     limit = int(entry.get('max_objekte', 10000))
     crs   = entry['kachel_crs']
@@ -850,8 +986,10 @@ def _fetch_tiled(entry, typname, dest_dir, http, cancel, log, progress, expected
             queue.extend([(x0, y0, mx, my), (mx, y0, x1, my), (x0, my, mx, y1), (mx, my, x1, y1)])
             continue
         dest = os.path.join(dest_dir, f'{safe}_{k:04d}.gml')
-        http.download(_wfs_url(entry['url'], typeNames=typname, count=limit, bbox=bbox),
-                      dest, cancel=cancel)
+        _s, hdrs = http.download(_wfs_url(entry['url'], typeNames=typname, count=limit, bbox=bbox),
+                                 dest, cancel=cancel)
+        if shas is not None:
+            shas.append((hdrs or {}).get('_sha256') or '')
         got = _feature_ids(dest, typname)
         if len(got) < n:
             raise SourceError('Der Dienst der Quelle hat unvollständige Daten geliefert. '
@@ -879,7 +1017,7 @@ def _referenced_ids(files, typname):
     return sorted(i.decode() for i in out)
 
 
-def _fetch_by_ids(entry, typname, ids, dest_dir, http, cancel, log, progress=None):
+def _fetch_by_ids(entry, typname, ids, dest_dir, http, cancel, log, progress=None, shas=None):
     """Fetch objects specifically via RESOURCEID (types without geometry that
     do not fit into one response)."""
     batch = int(entry.get('id_batch', 100))
@@ -890,7 +1028,10 @@ def _fetch_by_ids(entry, typname, ids, dest_dir, http, cancel, log, progress=Non
             raise Cancelled()
         part = ids[i:i + batch]
         dest = os.path.join(dest_dir, f'{safe}_ids_{i // batch:04d}.gml')
-        http.download(_wfs_url(entry['url'], resourceId=','.join(part)), dest, cancel=cancel)
+        _s, hdrs = http.download(_wfs_url(entry['url'], resourceId=','.join(part)), dest,
+                                 cancel=cancel)
+        if shas is not None:
+            shas.append((hdrs or {}).get('_sha256') or '')
         got.update(x.decode() for x in _feature_ids(dest, typname))
         files.append(dest)
         if progress:
@@ -908,10 +1049,12 @@ def _fetch_by_ids(entry, typname, ids, dest_dir, http, cancel, log, progress=Non
     return files
 
 
-def fetch_wfs(entry, dest_dir, http, progress=None, cancel=None, log=None):
+def fetch_wfs(entry, dest_dir, http, progress=None, cancel=None, log=None, shas=None):
     """Fetch all feature types of the entry and save them as GML files.
     Returns the file list in import order (the GML import reads names/
-    administrative units from ALL files in pass 1)."""
+    administrative units from ALL files in pass 1). shas (list) receives the
+    SHA-256 of every file in the same order — for change detection without
+    reading the files again."""
     os.makedirs(dest_dir, exist_ok=True)
     for old in os.listdir(dest_dir):
         if old.endswith('.gml'):
@@ -919,7 +1062,6 @@ def fetch_wfs(entry, dest_dir, http, progress=None, cancel=None, log=None):
     mode   = entry.get('abruf', 'seiten')
     tiled  = entry.get('kachel_typ', 'ad:Address')
     limit  = int(entry.get('max_objekte', 10000))
-    check  = entry.get('vollstaendigkeit_pruefen', True)
     types  = list(entry['typnamen'])
     if mode == 'kacheln' and tiled in types:      # addresses first: they provide the IDs
         types.remove(tiled)
@@ -927,19 +1069,19 @@ def fetch_wfs(entry, dest_dir, http, progress=None, cancel=None, log=None):
     files = []
     addr_files = []
     for typname in types:
-        expected = wfs_hits(http, entry['url'], typname) if check or mode == 'kacheln' else None
+        # Every type is checked for completeness against the server's count
+        expected = wfs_hits(http, entry['url'], typname)
         if mode == 'kacheln' and typname == tiled:
-            f = _fetch_tiled(entry, typname, dest_dir, http, cancel, log, progress, expected)
+            f = _fetch_tiled(entry, typname, dest_dir, http, cancel, log, progress, expected, shas)
             addr_files = f
-        elif mode == 'kacheln' and expected is not None and expected > limit:
+        elif mode == 'kacheln' and expected > limit:
             ids = _referenced_ids(addr_files, typname)
             if log:
                 log(f'{typname}: {_n(expected)} Objekte, zu viele für eine Antwort — lade die '
                     f'{_n(len(ids))} referenzierten per ID')
-            f = _fetch_by_ids(entry, typname, ids, dest_dir, http, cancel, log, progress)
+            f = _fetch_by_ids(entry, typname, ids, dest_dir, http, cancel, log, progress, shas)
         else:
-            f = _fetch_paged(entry, typname, dest_dir, http, cancel, log, progress,
-                             expected if check else None)
+            f = _fetch_paged(entry, typname, dest_dir, http, cancel, log, progress, expected, shas)
         files.extend(f)
     if not files:
         raise SourceError('Der Dienst der Quelle hat keine Adressen geliefert.',
@@ -957,6 +1099,41 @@ def _tage_text(alter):
     if alter <= 0:
         return 'heute'
     return 'gestern' if alter == 1 else f'vor {alter} Tagen'
+
+
+_NO_NEW_DATA = 'Keine neuen Daten seit dem letzten Import.'
+
+
+def _unchanged(entry, text=_NO_NEW_DATA, fmt=None):
+    return {'status': 'unchanged', 'files': [], 'format': fmt or entry['format'],
+            'entry': entry, 'meta': None, 'text': text}
+
+
+def _meta(entry, url=None, **fields):
+    """source_meta fields of a download (url defaults to the catalog URL)."""
+    meta = {'url': url or entry.get('url'), 'etag': None, 'last_modified': None, 'sha256': None,
+            'dateien': '', 'heruntergeladen_am': _now_iso(), 'quelle': entry.get('quelle_name', '')}
+    meta.update(fields)
+    return meta
+
+
+def _log_source(log, entry):
+    log(f'Quelle: {entry.get("quelle_name", "")} · Lizenz {entry.get("lizenz", "?")}')
+
+
+def _same_source(prev_meta, entry):
+    """Did the last download (source_meta) come from this catalog entry? The
+    lock after a download only applies to the same source — not after a
+    fallback source or after the source was changed. Placeholders ({datum},
+    {jahr}, {nr}) in the entry's URL match any value."""
+    prev = _url_key(str(prev_meta.get('url') or ''))
+    cur = str(entry.get('url') or entry.get('pfad') or '')
+    if not prev or not cur:
+        return True                    # older state without URL: keep the lock
+    pat = re.escape(_url_key(cur))
+    for key in ('{datum}', '{jahr}', '{nr}'):
+        pat = pat.replace(re.escape(key), r'[^/]*')
+    return re.fullmatch(pat, prev) is not None
 
 
 def update_source(bundesland, db_path, prev_meta=None, force=False,
@@ -986,9 +1163,7 @@ def update_source(bundesland, db_path, prev_meta=None, force=False,
                 'entry': entry, 'meta': None,
                 'text': manual_text(bundesland, entry)}
 
-    ua   = cat.get('user_agent', 'QGIS-GISAkademieGeocoder/{version}').replace(
-        '{version}', user_agent_version)
-    http = http or Http(ua)
+    http = http or Http(user_agent(user_agent_version, cat))
     cache = cache_dir_for(db_path, bundesland)
     os.makedirs(cache, exist_ok=True)
     _log    = log or (lambda m: None)
@@ -999,9 +1174,11 @@ def update_source(bundesland, db_path, prev_meta=None, force=False,
     # downloads on its own. When updating, the source is only skipped as long as
     # the last download is more recent. For sources without ETag/Last-Modified (WFS)
     # and for sources that change daily (OpenStreetMap extracts) — otherwise every
-    # click would re-download the complete dataset (hundreds of MB).
+    # click would re-download the complete dataset (hundreds of MB). Only a
+    # download from this same source counts.
     tage = entry.get('min_abstand_tage')
-    if tage and prev_meta and not force and prev_meta.get('heruntergeladen_am'):
+    if (tage and prev_meta and not force and prev_meta.get('heruntergeladen_am')
+            and _same_source(prev_meta, entry)):
         try:
             last = datetime.fromisoformat(prev_meta['heruntergeladen_am'])
             alter = (datetime.now(last.tzinfo) - last).days
@@ -1027,7 +1204,7 @@ def update_source(bundesland, db_path, prev_meta=None, force=False,
                                  progress, _log, _detail, cancel)
 
     if entry['typ'] == 'wfs':
-        _log(f'Quelle: {entry.get("quelle_name", "")} · Lizenz {entry.get("lizenz", "?")}')
+        _log_source(_log, entry)
         _log('Lade Adressen vom Dienst der Landesvermessung'
              + (f' – das dauert {entry["dauer"]} …' if entry.get('dauer') else ' …'))
 
@@ -1037,28 +1214,23 @@ def update_source(bundesland, db_path, prev_meta=None, force=False,
                        else f'{_n(done)} {label} geladen …')
                 progress(done, total, txt)
 
-        files = fetch_wfs(entry, cache, http, progress=_wfs_progress, cancel=cancel, log=_detail)
-        sha = hashlib.sha256()
-        size = 0
-        for f in files:
-            size += os.path.getsize(f)
-            with open(f, 'rb') as fh:
-                for chunk in iter(lambda: fh.read(CHUNK), b''):
-                    sha.update(chunk)
-        digest = sha.hexdigest()
+        shas = []
+        files = fetch_wfs(entry, cache, http, progress=_wfs_progress, cancel=cancel, log=_detail,
+                          shas=shas)
+        if cancel and cancel():
+            raise Cancelled()
+        size = sum(os.path.getsize(f) for f in files)
+        # Checksum over the per-file checksums of the download (no second read)
+        digest = hashlib.sha256('\n'.join(shas).encode('ascii')).hexdigest()
         if prev_meta and not force and prev_meta.get('sha256') == digest:
-            return {'status': 'unchanged', 'files': [], 'format': entry['format'],
-                    'entry': entry, 'meta': None,
-                    'text': 'Keine neuen Daten seit dem letzten Import.'}
+            return _unchanged(entry)
         _log(f'Download abgeschlossen ({_mb(size)} MB).')
         _detail(f'{len(files)} GML-Dateien, SHA-256 {digest}')
-        meta = {'url': entry['url'], 'etag': None, 'last_modified': None, 'sha256': digest,
-                'dateien': ';'.join(os.path.basename(f) for f in files),
-                'heruntergeladen_am': _now_iso(), 'quelle': entry.get('quelle_name', '')}
+        meta = _meta(entry, sha256=digest, dateien=';'.join(os.path.basename(f) for f in files))
         return {'status': 'downloaded', 'files': files, 'format': entry['format'],
                 'entry': entry, 'meta': meta, 'text': ''}
 
-    _log(f'Quelle: {entry.get("quelle_name", "")} · Lizenz {entry.get("lizenz", "?")}')
+    _log_source(_log, entry)
     if entry.get('dauer'):
         _log(f'Download und Import dauern {entry["dauer"]}.')
     urls = resolve_download_urls(entry, http)
@@ -1068,6 +1240,9 @@ def update_source(bundesland, db_path, prev_meta=None, force=False,
         if cancel and cancel():
             raise Cancelled()
         pm = prev_meta if (prev_meta and len(urls) == 1) else None
+        # Several files: numbered names, so that equal names in different
+        # URLs (e.g. …/download?id=1, ?id=2) never overwrite each other
+        name = f'{i + 1:03d}_{_file_name_from_url(url)}' if len(urls) > 1 else None
 
         def _p(done, total, _i=i, _k=len(urls)):
             if progress:
@@ -1075,7 +1250,7 @@ def update_source(bundesland, db_path, prev_meta=None, force=False,
                        + (f' (Datei {_i + 1} von {_k})' if _k > 1 else '') + ' …')
                 progress(done, total, txt)
         info = download_file(http, url, cache, prev_meta=pm, force=force,
-                             progress=_p, cancel=cancel)
+                             progress=_p, cancel=cancel, name=name)
         infos.append(info)
         if info['status'] != 'unchanged':
             unchanged = False
@@ -1085,18 +1260,16 @@ def update_source(bundesland, db_path, prev_meta=None, force=False,
     # Unchanged according to server/checksum: this state is already imported (source_meta
     # is in the same DB) — the file in the cache folder is not needed for that.
     if unchanged:
-        return {'status': 'unchanged', 'files': [], 'format': entry['format'],
-                'entry': entry, 'meta': None,
-                'text': 'Keine neuen Daten seit dem letzten Import.'}
+        return _unchanged(entry)
 
+    used = set()
     for info in infos:
-        all_files.extend(extract_data_files(info['path'], cache, entry.get('entpacken')))
+        all_files.extend(extract_data_files(info['path'], cache, entry.get('entpacken'), _used=used))
     _detail('Datendateien: ' + ', '.join(os.path.basename(f) for f in all_files))
     first = infos[0]
-    meta  = {'url': first['url'], 'etag': first.get('etag'),
-             'last_modified': first.get('last_modified'), 'sha256': first.get('sha256'),
-             'dateien': ';'.join(os.path.basename(f) for f in all_files),
-             'heruntergeladen_am': _now_iso(), 'quelle': entry.get('quelle_name', '')}
+    meta  = _meta(entry, url=first['url'], etag=first.get('etag'),
+                  last_modified=first.get('last_modified'), sha256=first.get('sha256'),
+                  dateien=';'.join(os.path.basename(f) for f in all_files))
     return {'status': 'downloaded', 'files': all_files, 'format': entry['format'],
             'entry': entry, 'meta': meta, 'text': ''}
 
@@ -1105,6 +1278,14 @@ def fetch_online_catalog(http=None, user_agent_version='dev', url=None):
     """Fetch the online source list (conditionally via ETag) and cache it.
     Returns (status, text) with status 'neu' | 'aktuell' | 'zu_neu' | 'fehler'.
     Never raises — without network the previous list simply stays in effect."""
+    try:
+        return _fetch_online_catalog(http, user_agent_version, url)
+    except Exception as e:
+        return 'fehler', ('Die Quellenliste konnte online nicht geprüft werden — es gilt die bisherige. '
+                          f'({type(e).__name__})')
+
+
+def _fetch_online_catalog(http, user_agent_version, url):
     if not ONLINE_CATALOG_PATH:
         return 'fehler', 'Kein Speicherort für die Online-Quellenliste gesetzt.'
     try:
@@ -1112,9 +1293,11 @@ def fetch_online_catalog(http=None, user_agent_version='dev', url=None):
     except Exception as e:
         return 'fehler', f'Mitgelieferte Quellenliste nicht lesbar: {e}'
     alt = load_online_catalog() or {}
-    url = url or alt.get('katalog_url') or base.get('katalog_url') or DEFAULT_CATALOG_URL
-    ua = base.get('user_agent', 'QGIS-GISAkademieGeocoder/{version}').replace('{version}', user_agent_version)
-    http = http or Http(ua, timeout=30)
+    # The address of the list comes from the newer of the two lists (a plugin
+    # update may move it, a newer online list may announce a new one)
+    newer = alt if _iso_date(alt.get('stand')) > _iso_date(base.get('stand')) else base
+    url = url or newer.get('katalog_url') or base.get('katalog_url') or DEFAULT_CATALOG_URL
+    http = http or Http(user_agent(user_agent_version, base), timeout=30)
     headers = {}
     meta_alt = alt.get('_online') or {}
     if meta_alt.get('etag') and meta_alt.get('url') == url:
@@ -1138,9 +1321,12 @@ def fetch_online_catalog(http=None, user_agent_version='dev', url=None):
             raise ValueError('keine Quellenliste')
     except Exception:
         return 'fehler', 'Die online abgerufene Quellenliste ist ungültig und wird nicht verwendet.'
-    if int(data.get('version', 1) or 1) > CATALOG_SCHEMA:
+    if _schema_version(data.get('version')) > CATALOG_SCHEMA:
         return 'zu_neu', ('Die online verfügbare Quellenliste braucht eine neuere Version des Plugins. '
                           'Bitte das Plugin aktualisieren; bis dahin gilt die bisherige Liste.')
+    if alt and _iso_date(data.get('stand')) < _iso_date(alt.get('stand')):
+        # An older copy (e.g. from a cache on the way) never replaces a newer list
+        return 'aktuell', _stand_text(base, alt)
     neu = _iso_date(data.get('stand')) > _iso_date((alt or base).get('stand')) \
         and _iso_date(data.get('stand')) > _iso_date(base.get('stand'))
     data['_online'] = {'url': url, 'etag': hdrs.get('etag', ''), 'abgerufen': jetzt}
@@ -1178,44 +1364,68 @@ def _ogc_get_json(http, url):
                           detail=f'kein JSON von {url}') from e
 
 
-def _ogc_page_url(entry, offset):
+def _ogc_page_url(entry, offset, limit=None):
     base = entry['url']
     sep = '&' if '?' in base else '?'
     return f'{base}{sep}' + urllib.parse.urlencode(
-        {'f': 'json', 'limit': int(entry.get('seitengroesse') or 2500), 'offset': offset})
+        {'f': 'json', 'limit': int(limit or entry.get('seitengroesse') or 2500), 'offset': offset})
+
+
+def _ogc_next_link(data, page_url):
+    for link in data.get('links') or []:
+        if isinstance(link, dict) and link.get('rel') == 'next' and link.get('href'):
+            return urllib.parse.urljoin(page_url, link['href'])
+    return None
 
 
 def _update_ogcapi(bundesland, entry, http, cache, prev_meta, force, progress, _log, _detail,
                    cancel):
     """OGC API Features (e.g. Saarland): load all pages as GeoJSON and write
     them into an HK-BY address file (field mapping 'felder'). Change
-    detection via the file's checksum (the service provides no ETag)."""
-    from .osm_convert import HK_BY_HEADER, split_housenumbers, _LANDSCHL
+    detection via the file's checksum (the service provides no ETag).
+
+    Paging follows the 'next' links of the service (OGC API Features Part 1);
+    only a service without links is paged by offset. A page that brings no new
+    objects ends the download (protects against servers ignoring offset), and
+    the number of unique objects is checked against numberMatched."""
+    from .osm_convert import HK_BY_HEADER, split_housenumbers, hk_by_row, _clean, _LANDSCHL
     from .plz_resolver import _utm_forward
     felder = entry['felder']
     os.makedirs(cache, exist_ok=True)
     out = os.path.join(cache, 'adressen_ogcapi.txt')
-    _log(f'Quelle: {entry.get("quelle_name", "")} · Lizenz {entry.get("lizenz", "?")}')
+    _log_source(_log, entry)
     _log('Lade Adressen vom Dienst der Landesvermessung'
          + (f' – das dauert {entry["dauer"]} …' if entry.get('dauer') else ' …'))
     landschl = _LANDSCHL.get(bundesland, '')
-    sha, n_ok, total, offset, seen = hashlib.sha256(), 0, 0, 0, set()
+    sha, n_ok, total, offset = hashlib.sha256(), 0, 0, 0
+    seen, ids = set(), set()
     limit = int(entry.get('seitengroesse') or 2500)
 
     def val(props, key):
         k = felder.get(key)
         v = props.get(k) if k else None
-        return '' if v is None else str(v).replace(';', ',').strip()
+        return '' if v is None else _clean(str(v))
 
+    url = _ogc_page_url(entry, 0)
     with open(out, 'w', encoding='utf-8', newline='') as fh:
         fh.write(';'.join(HK_BY_HEADER) + '\r\n')
-        while True:
+        while url:
             if cancel and cancel():
                 raise Cancelled()
-            data = _ogc_get_json(http, _ogc_page_url(entry, offset))
+            data = _ogc_get_json(http, url)
+            if not isinstance(data, dict):
+                raise SourceError('Der Dienst hat keine lesbaren Daten geliefert. Bitte später '
+                                  'erneut versuchen.', detail=f'keine FeatureCollection von {url}')
             feats = data.get('features') or []
             total = int(data.get('numberMatched') or total or 0)
+            new = 0
             for f in feats:
+                fid = f.get('id')
+                fkey = fid if fid is not None else json.dumps(f, sort_keys=True)[:500]
+                if fkey in ids:
+                    continue
+                ids.add(fkey)
+                new += 1
                 p = f.get('properties') or {}
                 g = f.get('geometry') or {}
                 strasse, hn = val(p, 'strasse'), val(p, 'hausnummer')
@@ -1230,34 +1440,38 @@ def _update_ogcapi(bundesland, entry, http, cache, prev_meta, force, progress, _
                     if key in seen:
                         continue
                     seen.add(key)
-                    row = ['N', str(f.get('id', ''))[:16], '', landschl, bundesland, '', '', '', '',
-                           '', gem, '', '', '', strasse, hnr, adz, '32', f'{x:.2f}', f'{y:.2f}',
-                           val(p, 'plz'), gem, '', '']
+                    row = hk_by_row(landschl, bundesland, '', gem, strasse, hnr, adz, '32', x, y,
+                                    val(p, 'plz'), gem, ident=_clean(str(fid or ''))[:16])
                     line = ';'.join(row) + '\r\n'
                     fh.write(line)
                     sha.update(line.encode('utf-8'))
                     n_ok += 1
             offset += len(feats)
             if progress:
-                txt = (f'{_n(offset)} von {_n(total)} Adressen geladen …' if total
-                       else f'{_n(offset)} Adressen geladen …')
-                progress(offset, total, txt)
-            if len(feats) < limit or (total and offset >= total):
+                txt = (f'{_n(len(ids))} von {_n(total)} Adressen geladen …' if total
+                       else f'{_n(len(ids))} Adressen geladen …')
+                progress(len(ids), total, txt)
+            if not feats or not new or (total and len(ids) >= total):
                 break
-    if total and offset < total:
-        raise SourceError(f'Der Download war unvollständig ({_n(offset)} von {_n(total)} Adressen). '
+            nxt = _ogc_next_link(data, url)
+            if nxt:
+                url = nxt
+            elif data.get('links') and len(feats) < limit and not (total and len(ids) < total):
+                url = None                 # links without 'next': this was the last page
+            else:
+                url = _ogc_page_url(entry, offset)
+    if total and len(ids) < total:
+        raise SourceError(f'Der Download war unvollständig ({_n(len(ids))} von {_n(total)} Adressen). '
                           'Der bisherige Bestand bleibt erhalten — bitte später erneut versuchen.',
-                          detail=f'ogcapi {entry["url"]}: {offset} von {total}')
+                          detail=f'ogcapi {entry["url"]}: {len(ids)} eindeutige von {total}',
+                          kind='voruebergehend')
     digest = sha.hexdigest()
-    _detail(f'{bundesland}: {n_ok} Adressen aus {offset} Objekten, SHA-256 {digest}')
+    _detail(f'{bundesland}: {n_ok} Adressen aus {len(ids)} Objekten, SHA-256 {digest}')
     if prev_meta and not force and prev_meta.get('sha256') == digest:
         _unlink(out)
-        return {'status': 'unchanged', 'files': [], 'format': 'hkde', 'entry': entry, 'meta': None,
-                'text': 'Keine neuen Daten seit dem letzten Import.'}
+        return _unchanged(entry, fmt='hkde')
     _log(f'{_n(n_ok)} Adressen geladen.')
-    meta = {'url': entry['url'], 'etag': None, 'last_modified': None, 'sha256': digest,
-            'dateien': os.path.basename(out), 'heruntergeladen_am': _now_iso(),
-            'quelle': entry.get('quelle_name', '')}
+    meta = _meta(entry, sha256=digest, dateien=os.path.basename(out))
     return {'status': 'downloaded', 'files': [out], 'format': 'hkde', 'entry': entry, 'meta': meta,
             'text': ''}
 
@@ -1286,7 +1500,7 @@ def gaialight_latest(entry, http):
             if best is None or (cand['datum'], cand['bestand']) > (best['datum'], best['bestand']):
                 best = cand
     if not best:
-        raise SourceError(_SOURCE_CHANGED, detail=f'Keine Bestände für {entry["objekt"]} in {base}')
+        raise SourceError(_SOURCE_CHANGED, kind='geaendert', detail=f'Keine Bestände für {entry["objekt"]} in {base}')
     return best
 
 
@@ -1301,9 +1515,8 @@ def _update_gaialight(bundesland, entry, http, cache, prev_meta, force, progress
     kennung = f'gaialight:{best["bestand"]}'
     _detail(f'{bundesland}: neuester Bestand {best["bestand"]} vom {best["datum"]}')
     if prev_meta and not force and prev_meta.get('etag') == kennung:
-        return {'status': 'unchanged', 'files': [], 'format': entry['format'], 'entry': entry,
-                'meta': None, 'text': 'Keine neuen Daten seit dem letzten Import.'}
-    _log(f'Quelle: {entry.get("quelle_name", "")} · Lizenz {entry.get("lizenz", "?")}')
+        return _unchanged(entry)
+    _log_source(_log, entry)
     q = urllib.parse.urlencode({'action': 'start', 'type': entry['objekt'],
                                 'file[]': best['bestand'] + '.zip', 'id[]': best['id']})
     _s, _h, body = http.get(f'{base}/multi.php?{q}')
@@ -1351,9 +1564,8 @@ def _update_gaialight(bundesland, entry, http, cache, prev_meta, force, progress
     if _iso_date(stand):
         lm = formatdate(datetime.strptime(stand, '%Y-%m-%d').replace(
             tzinfo=timezone.utc).timestamp(), usegmt=True)
-    meta = {'url': entry['url'], 'etag': kennung, 'last_modified': lm, 'sha256': info.get('sha256'),
-            'dateien': ';'.join(os.path.basename(f) for f in files),
-            'heruntergeladen_am': _now_iso(), 'quelle': entry.get('quelle_name', '')}
+    meta = _meta(entry, etag=kennung, last_modified=lm, sha256=info.get('sha256'),
+                 dateien=';'.join(os.path.basename(f) for f in files))
     return {'status': 'downloaded', 'files': files, 'format': entry['format'], 'entry': entry,
             'meta': meta, 'text': ''}
 
@@ -1378,16 +1590,12 @@ def _update_index_geojson(bundesland, entry, http, prev_meta, force, _log, _deta
             if status != 304:
                 geaendert += 1
         if not geaendert:
-            return {'status': 'unchanged', 'files': [], 'format': entry['format'],
-                    'entry': entry, 'meta': None,
-                    'text': 'Keine neuen Daten seit dem letzten Import.'}
+            return _unchanged(entry)
         _log(f'Neue Daten bei {geaendert} von {len(urls)} Dateien.')
-    _log(f'Quelle: {entry.get("quelle_name", "")} · Lizenz {entry.get("lizenz", "?")}')
+    _log_source(_log, entry)
     if entry.get('dauer'):
         _log(f'Download und Umwandlung dauern {entry["dauer"]}.')
-    meta = {'url': entry['url'], 'etag': None, 'last_modified': None, 'sha256': None,
-            'dateien': f'{len(urls)} Dateien', 'heruntergeladen_am': _now_iso(),
-            'quelle': entry.get('quelle_name', '')}
+    meta = _meta(entry, dateien=f'{len(urls)} Dateien')
     return {'status': 'downloaded', 'files': [], 'remote': urls, 'format': entry['format'],
             'entry': entry, 'meta': meta, 'text': ''}
 
@@ -1426,9 +1634,7 @@ def _update_from_file(bundesland, entry, db_path, prev_meta, force, log, detail)
                           detail=f'Datei fehlt: {path}')
     etag, lm, size = file_signature(path)
     if prev_meta and not force and prev_meta.get('url') == path and prev_meta.get('etag') == etag:
-        return {'status': 'unchanged', 'files': [], 'format': entry['format'],
-                'entry': entry, 'meta': None,
-                'text': 'Die Datei ist seit dem letzten Import unverändert.'}
+        return _unchanged(entry, 'Die Datei ist seit dem letzten Import unverändert.')
     _log(f'Datei: {os.path.basename(path)} ({_mb(size)} MB, Stand {format_last_modified(lm)})')
     _detail(f'{bundesland}: eingetragene Datei {path}')
     temp_dir = None
@@ -1444,34 +1650,28 @@ def _update_from_file(bundesland, entry, db_path, prev_meta, force, log, detail)
             if not files:
                 raise SourceError('Im Zip wurde kein Shapefile gefunden.')
         _detail('Entpackt: ' + ', '.join(os.path.basename(f) for f in files))
-    meta = {'url': path, 'etag': etag, 'last_modified': lm, 'sha256': None,
-            'dateien': ';'.join(os.path.basename(f) for f in files),
-            'heruntergeladen_am': _now_iso(), 'quelle': entry.get('quelle_name', '')}
+    meta = _meta(entry, url=path, etag=etag, last_modified=lm,
+                 dateien=';'.join(os.path.basename(f) for f in files))
     return {'status': 'downloaded', 'files': files, 'format': entry['format'],
             'entry': entry, 'meta': meta, 'text': '', 'temp_dir': temp_dir}
 
 
 def test_source(entry, http=None, user_agent_version='dev'):
     """Check a source without importing anything (for the source editor).
-    Returns (ok, text)."""
+    Returns (ok, text) — never raises."""
     try:
         validate_catalog({'sources': {'Test': entry}})
     except Exception as e:
         return False, f'Eintrag ungültig: {e}'
-    if entry.get('typ') == 'gaialight':
-        try:
-            ua = f'QGIS-GISAkademieGeocoder/{user_agent_version} (+https://gis-akademie.de)'
-            best = gaialight_latest(entry, http or Http(ua, timeout=30))
-        except SourceError as e:
-            return False, str(e)
-        return True, f'Neuester Bestand: {best["bestand"]} vom {_datum_de(best["datum"][:10])}'
-    if entry.get('typ') == 'index_geojson':
-        try:
-            ua = f'QGIS-GISAkademieGeocoder/{user_agent_version} (+https://gis-akademie.de)'
-            urls = index_geojson_urls(entry, http or Http(ua, timeout=30))
-        except SourceError as e:
-            return False, str(e)
-        return True, f'{len(urls)} Dateien in der Dateiliste, z.B. {_file_name_from_url(urls[0])}'
+    try:
+        return _test_source(entry, http, user_agent_version)
+    except SourceError as e:
+        return False, str(e)
+    except Exception as e:
+        return False, f'{type(e).__name__}: {e}'
+
+
+def _test_source(entry, http, user_agent_version):
     if is_file_source(entry):
         if not os.path.isfile(entry['pfad']):
             return False, 'Die Datei wurde nicht gefunden.'
@@ -1479,34 +1679,42 @@ def test_source(entry, http=None, user_agent_version='dev'):
         return True, f'Datei vorhanden · {_mb(size)} MB · Stand {format_last_modified(lm)}'
     if not is_automatic(entry):
         return False, 'Manuelle Quellen werden nicht abgerufen.'
-    ua = f'QGIS-GISAkademieGeocoder/{user_agent_version} (+https://gis-akademie.de)'
-    http = http or Http(ua, timeout=30)
-    try:
-        if entry['typ'] == 'wfs':
-            typ = entry['typnamen'][-1]
-            url = (f"{entry['url']}{'&' if '?' in entry['url'] else '?'}"
-                   + urllib.parse.urlencode({'service': 'WFS', 'version': '2.0.0',
-                                             'request': 'GetFeature', 'typeNames': typ,
-                                             'resultType': 'hits'}))
-            _s, _h, body = http.get(url, max_bytes=20000)
-            m = re.search(rb'numberMatched="([^"]+)"', body)
-            if not m:
-                return False, 'WFS antwortet, aber ohne numberMatched — Typname prüfen.'
-            return True, f'WFS erreichbar: {m.group(1).decode()} Objekte vom Typ {typ}.'
-        urls = resolve_download_urls(entry, http)
-        _s, hdrs, _b = http.get(urls[0], max_bytes=4)
-        size = hdrs.get('content-length')
-        stand = format_last_modified(hdrs.get('last-modified'))
-        txt = f'{len(urls)} Datei(en) gefunden: ' + ', '.join(_file_name_from_url(u) for u in urls[:5])
-        if size:
-            txt += f' · {_mb(int(size))} MB'
-        if stand:
-            txt += f' · Stand {stand}'
-        return True, txt
-    except SourceError as e:
-        return False, str(e)
-    except Exception as e:
-        return False, f'{type(e).__name__}: {e}'
+    http = http or Http(user_agent(user_agent_version), timeout=30)
+    typ = entry['typ']
+    if typ == 'gaialight':
+        best = gaialight_latest(entry, http)
+        return True, f'Neuester Bestand: {best["bestand"]} vom {_datum_de(best["datum"][:10])}'
+    if typ == 'index_geojson':
+        urls = index_geojson_urls(entry, http)
+        return True, f'{len(urls)} Dateien in der Dateiliste, z.B. {_file_name_from_url(urls[0])}'
+    if typ == 'wfs':
+        typname = entry['typnamen'][-1]
+        n = wfs_hits(http, entry['url'], typname)
+        return True, f'Dienst erreichbar: {_n(n)} {_de(typname)}.'
+    if typ == 'ogcapi':
+        data = _ogc_get_json(http, _ogc_page_url(entry, 0, limit=1))
+        feats = data.get('features') if isinstance(data, dict) else None
+        if feats is None:
+            return False, 'Der Dienst antwortet, liefert aber keine Objekte – Adresse prüfen.'
+        total = data.get('numberMatched')
+        return True, ('Dienst erreichbar' + (f': {_n(total)} Adressen' if total else '') + '.')
+    urls = resolve_download_urls(entry, http)
+    _s, hdrs, _b = http.get(urls[0], headers={'Range': 'bytes=0-3'}, max_bytes=4)
+    if _is_html(hdrs):
+        return False, (f'Der Server {_host(urls[0])} liefert derzeit keine Datei, sondern eine '
+                       'Webseite (z.B. Wartung).')
+    size = hdrs.get('content-length')
+    if hdrs.get('content-range', '').rpartition('/')[2].isdigit():
+        size = hdrs['content-range'].rpartition('/')[2]
+    elif _s == 206:
+        size = None
+    stand = format_last_modified(hdrs.get('last-modified'))
+    txt = f'{len(urls)} Datei(en) gefunden: ' + ', '.join(_file_name_from_url(u) for u in urls[:5])
+    if size and str(size).isdigit():
+        txt += f' · {_mb(int(size))} MB'
+    if stand:
+        txt += f' · Stand {stand}'
+    return True, txt
 
 
 def format_last_modified(value):

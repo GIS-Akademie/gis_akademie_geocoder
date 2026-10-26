@@ -87,7 +87,7 @@ def test_test_source_direct_and_wfs():
             return 200, {}, b'<wfs:FeatureCollection numberMatched="518416"/>'
     ok, txt = sd.test_source({'typ': 'wfs', 'url': 'https://wfs', 'format': 'gml',
                               'typnamen': ['ad:Address']}, http=H({}))
-    assert ok and '518416' in txt
+    assert ok and '518.416' in txt
 
 
 # ── Download: same checksum with a new URL ───────────────────────────────────

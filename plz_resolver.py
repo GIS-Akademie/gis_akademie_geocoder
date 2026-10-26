@@ -57,6 +57,7 @@ BUNDLED_META = os.path.join(PLUGIN_DIR, 'data', 'plz_gebiete.json')
 _ENABLED  = True      # test suite switches off the automatic fill-in
 _OVERRIDE = None      # custom PLZ file: dict(path, field, layer, name)
 _CACHE    = {}        # source key -> loaded resolver
+_NACHLAUF_CHUNK = 50000   # rows per chunk of the PLZ post-processing
 
 
 def _n(x):
@@ -64,6 +65,34 @@ def _n(x):
         return f'{int(x):,}'.replace(',', '.')
     except (TypeError, ValueError):
         return str(x)
+
+
+def attr_text(val):
+    """Attribute value of a feature as text. NULL — None, QVariant NULL
+    (QGIS 3 / PyQt5: str() would yield 'NULL') or qgis.core.NULL — becomes ''.
+    Whole-number floats (12.0) lose the '.0'."""
+    if val is None:
+        return ''
+    try:
+        if hasattr(val, 'isNull') and val.isNull():
+            return ''
+    except Exception:
+        pass
+    if isinstance(val, float):
+        if val != val:                      # NaN
+            return ''
+        if val.is_integer():
+            return str(int(val))
+    return str(val).strip()
+
+
+def plz_text(val):
+    """PLZ attribute as text; a numeric PLZ that lost its leading zero
+    (1067, 1067.0 or '1067') becomes '01067'."""
+    s = attr_text(val)
+    if len(s) == 4 and s.isdigit():
+        s = '0' + s
+    return s
 
 
 # ── Active source ────────────────────────────────────────────────────────────
@@ -102,14 +131,21 @@ def active_source():
         p = _OVERRIDE['path']
         if not os.path.exists(p):
             return None
-        mtime = int(os.path.getmtime(p))
-        return {'path': p, 'field': _OVERRIDE.get('field') or 'plz',
-                'layer': _OVERRIDE.get('layer') or None,
+        mtimes = _source_mtimes(p)
+        mtime = max(mtimes) if mtimes else int(os.path.getmtime(p))
+        layer = _OVERRIDE.get('layer') or None
+        field = _OVERRIDE.get('field') or 'plz'
+        # The key must change with everything that changes the areas: path,
+        # layer of a GeoPackage, field and the times of all relevant files
+        # (.shp AND .dbf of a shapefile).
+        return {'path': p, 'field': field,
+                'layer': layer,
                 'name': _OVERRIDE.get('name') or os.path.basename(p),
                 'stand': datetime.fromtimestamp(mtime).date().isoformat(),
                 'lizenz': _OVERRIDE.get('lizenz', ''), 'attribution': '',
                 'eigene': True, 'crs': None,
-                'key': f'eigene:{os.path.basename(p)}:{mtime}:{_OVERRIDE.get("field")}'}
+                'key': (f'eigene:{os.path.abspath(p)}|{layer or ""}|{field}|'
+                        + ':'.join(str(t) for t in mtimes))}
     if not os.path.exists(BUNDLED_GEO):
         return None
     m = bundled_meta()
@@ -122,6 +158,25 @@ def active_source():
             # checksum as a CRC32 number (the plugin repository's security scan
             # treats a hex checksum as a potential secret)
             'key': f'osm:{stand}:{m.get("pruefsumme_crc32") or (m.get("sha256") or "")[:12]}'}
+
+
+def _source_mtimes(path):
+    """Modification times (int seconds) of a PLZ file and its relevant sidecar
+    files: .shp and .dbf of a shapefile, the -wal file of a GeoPackage."""
+    base, ext = os.path.splitext(path)
+    ext = ext.lower()
+    files = [path]
+    if ext == '.shp':
+        files += [base + e for e in ('.dbf', '.DBF') if os.path.exists(base + e)][:1]
+    elif ext == '.gpkg' and os.path.exists(path + '-wal'):
+        files.append(path + '-wal')
+    out = []
+    for f in files:
+        try:
+            out.append(int(os.path.getmtime(f)))
+        except OSError:
+            pass
+    return out
 
 
 def _date_de(iso):
@@ -186,8 +241,7 @@ class PlzResolver:
             fid = feat.id()
             self._index.addFeature(feat)
             self._geoms[fid] = geom
-            val = feat.attribute(plz_idx)
-            self._plz[fid] = "" if val is None else str(val).strip()
+            self._plz[fid] = plz_text(feat.attribute(plz_idx))
         del layer   # release in the same thread it was created in
 
         if not self._geoms:
@@ -328,7 +382,7 @@ class PyPlzResolver:
         self._feats = []         # (plz, bbox, [(xs, ys), ...])
         self._grid = {}
         for feat in fc.get('features', []):
-            plz = str((feat.get('properties') or {}).get(plz_field) or '').strip()
+            plz = plz_text((feat.get('properties') or {}).get(plz_field))
             geom = feat.get('geometry') or {}
             polys = geom.get('coordinates') or []
             if geom.get('type') == 'Polygon':
@@ -459,20 +513,11 @@ def load_active(detail=None):
 
 
 def build_resolver_logged(source=None, plz_field="plz", layer_name=None, log=None, detail=None):
-    """Resolver for an import. Without 'source', the active source (bundled
-    postcode areas or custom file); with 'source', exactly that file (older
-    route via set_plz_layer). Returns a ResolverSession or None."""
-    if not source:
-        return load_active(detail)
-    r = make_resolver(source, plz_field=plz_field, layer_name=layer_name)
-    if r is None or not r.ok:
-        if log:
-            log('PLZ-Datei kann nicht verwendet werden: {} – der Import läuft ohne '
-                'PLZ-Ergänzung weiter.'.format(r.error if r else ''))
-        return None
-    src = {'name': os.path.basename(source), 'field': plz_field,
-           'key': f'datei:{os.path.basename(source)}'}
-    return ResolverSession(r, src)
+    """Resolver for an import: always the active source (bundled postcode
+    areas or the custom file set via set_override). source, plz_field and
+    layer_name are ignored — they only keep older calls working.
+    Returns a ResolverSession or None."""
+    return load_active(detail)
 
 
 # ── Post-processing: PLZ for already imported addresses ──────────────────────
@@ -513,18 +558,13 @@ def ergaenze_plz(db_path, bundeslaender=None, log=None, detail=None, progress=No
             # from areas yet — then the (index-backed) gaps are sufficient.
             old_key = meta.get(bl)
             recompute = bool(old_key) and old_key != src['key']
-            rows = conn.execute(
-                "SELECT id, x, y, epsg, plz, plz_herkunft FROM addresses "
-                "WHERE plz = '' AND bundesland = ?", (bl,)).fetchall()
-            rows += conn.execute(
-                "SELECT id, x, y, epsg, plz, plz_herkunft FROM addresses "
-                "WHERE plz IS NULL AND bundesland = ?", (bl,)).fetchall()
+            conds = ["plz = '' AND bundesland = ?", "plz IS NULL AND bundesland = ?"]
             if recompute:
-                rows += conn.execute(
-                    "SELECT id, x, y, epsg, plz, plz_herkunft FROM addresses "
-                    "WHERE bundesland = ? AND plz_herkunft = 'gebiet' AND plz <> ''",
-                    (bl,)).fetchall()
-            if not rows:
+                # first, so that the gaps filled below are not computed twice
+                conds.insert(0, "bundesland = ? AND plz_herkunft = 'gebiet' AND plz <> ''")
+            total = sum(conn.execute(f"SELECT COUNT(*) FROM addresses WHERE {c}",
+                                     (bl,)).fetchone()[0] for c in conds)
+            if not total:
                 if old_key != src['key']:   # remember the version so it is not re-checked every time
                     _lc.record_plz_meta(conn, bl, {'layer': src['name'], 'feld': src['field'],
                                                    'ergaenzt': 0, 'ohne_flaeche': 0,
@@ -536,26 +576,51 @@ def ergaenze_plz(db_path, bundeslaender=None, log=None, detail=None, progress=No
                 if session is None:
                     return result
             if detail:
-                detail(f'{bl}: PLZ-Nachlauf für {len(rows)} Adressen '
+                detail(f'{bl}: PLZ-Nachlauf für {total} Adressen '
                        f'({"Neuberechnung" if recompute else "nur fehlende"})')
-            updates, cleared, n_new = [], [], 0
-            for i, (aid, x, y, epsg, plz, herkunft) in enumerate(rows):
-                if cancel and cancel() and i % 1000 == 0:
+            n_new, n_upd, done, cancelled = 0, 0, 0, False
+            # Streamed in chunks (a whole state would need up to ~2 GB in QGIS);
+            # only rows already read are updated, so the scan is not disturbed.
+            for cond in conds:
+                cur = conn.execute("SELECT id, x, y, epsg, plz, plz_herkunft FROM addresses "
+                                   f"WHERE {cond}", (bl,))
+                while True:
+                    chunk = cur.fetchmany(_NACHLAUF_CHUNK)
+                    if not chunk:
+                        break
+                    if cancel and cancel():
+                        cancelled = True
+                        break
+                    updates, cleared = [], []
+                    for aid, x, y, epsg, plz, herkunft in chunk:
+                        p = session.lookup(x, y, epsg or 25832)
+                        if p:
+                            if p != (plz or '') or herkunft != 'gebiet':
+                                updates.append((p, aid))
+                                if not plz:
+                                    n_new += 1
+                        elif herkunft == 'gebiet':
+                            cleared.append((aid,))
+                    conn.executemany("UPDATE addresses SET plz = ?, plz_herkunft = 'gebiet' "
+                                     "WHERE id = ?", updates)
+                    conn.executemany("UPDATE addresses SET plz = '', plz_herkunft = NULL "
+                                     "WHERE id = ?", cleared)
+                    n_upd += len(updates)
+                    done += len(chunk)
+                    if progress:
+                        progress(done, total, f'{bl}: PLZ werden ergänzt …')
+                cur.close()
+                if cancelled:
                     break
-                p = session.lookup(x, y, epsg or 25832)
-                if p:
-                    if p != (plz or '') or herkunft != 'gebiet':
-                        updates.append((p, aid))
-                        if not plz:
-                            n_new += 1
-                elif herkunft == 'gebiet':
-                    cleared.append((aid,))
-                if progress and i % 20000 == 0:
-                    progress(i, len(rows), f'{bl}: PLZ werden ergänzt …')
-            conn.executemany("UPDATE addresses SET plz = ?, plz_herkunft = 'gebiet' WHERE id = ?",
-                             updates)
-            conn.executemany("UPDATE addresses SET plz = '', plz_herkunft = NULL WHERE id = ?",
-                             cleared)
+            if cancelled:
+                # The PLZ computed so far are correct and kept, but the state is
+                # NOT marked as done with the new version of the areas — the next
+                # run continues (missing PLZ / recomputation with the old key).
+                _lc.refresh_plz_coverage(conn, bl)
+                conn.commit()
+                if detail:
+                    detail(f'{bl}: PLZ-Nachlauf abgebrochen ({done} von {total} Adressen).')
+                break
             info = session.info()
             _lc.record_plz_meta(conn, bl, info, True)
             _lc.refresh_plz_coverage(conn, bl)
@@ -564,7 +629,7 @@ def ergaenze_plz(db_path, bundeslaender=None, log=None, detail=None, progress=No
             result[bl] = n_new
             if n_new:
                 _log(f'{bl}: PLZ für {_n(n_new)} Adressen ergänzt.')
-            elif updates and recompute:
+            elif n_upd and recompute:
                 _log(f'{bl}: PLZ aus den neuen PLZ-Gebieten aktualisiert.')
         return result
     finally:

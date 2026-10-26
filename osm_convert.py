@@ -11,7 +11,9 @@ All OSM objects with addr:housenumber and addr:street (or addr:place) are
 taken over: address points, buildings (point on surface) and lines.
   * House number lists („12;14“) yield one address per number.
   * Duplicate addresses (e.g. address point AND building with the same
-    address) are merged — the first hit (point) is kept.
+    address, closer than ~100 m) are merged — the first hit (point) is kept.
+    The comparison uses the final municipality (also the one determined from
+    the boundaries), so equal addresses in different places are kept.
   * Municipality = addr:city; if missing, it is determined from the municipal
     boundaries in the same extract (boundary=administrative, admin_level 8,
     otherwise 7/6).
@@ -61,7 +63,63 @@ def gdal_available():
 
 
 def _clean(v):
+    """Text field of an HK-BY row: no field separator ';', no line breaks."""
     return (v or '').replace(';', ',').replace('\r', ' ').replace('\n', ' ').strip()
+
+
+def hk_by_row(landschl, bundesland, kreis, gemeinde, strasse, hnr, adz, zone, x, y, plz,
+              postonm, ident='', qua='', ott=''):
+    """One address as a 24-column HK-BY row (list of strings, see HK_BY_HEADER).
+    Text fields are cleaned (_clean); x/y are written with 2 decimals.
+    kreis -> column 'kreis' (the import uses it as district/locality),
+    gemeinde -> 'gmd', postonm -> 'postonm' (municipality fallback of the
+    import), ident -> 'oid' (max. 16 characters), qua -> 'qua',
+    ott -> 'ott' and 'postott'."""
+    ott = _clean(ott)
+    return ['N', _clean(str(ident))[:16], _clean(qua), landschl, bundesland, '', '', '',
+            _clean(kreis), '', _clean(gemeinde), '', ott, '',
+            _clean(strasse), _clean(hnr), _clean(adz), str(zone),
+            f'{float(x):.2f}', f'{float(y):.2f}', _clean(plz), _clean(postonm), '', ott]
+
+
+class _DupIndex:
+    """Duplicate detection of addresses: same street, number, suffix, PLZ and
+    municipality AND close to each other (an address point and the building
+    with the same address). Equal addresses far apart — e.g. 'Hauptstraße 1'
+    in two villages of one municipality — are different addresses and kept.
+
+    Keys are stored per grid cell (CELL m); a lookup checks all cells within
+    NEAR m of the point, so near duplicates across a cell border are found."""
+
+    CELL = 500.0
+    NEAR = 100.0
+
+    def __init__(self, seen=None):
+        self.seen = seen if seen is not None else set()
+
+    def _key(self, base, gx, gy):
+        return hash((base, gx, gy))
+
+    def check_add(self, x, y, *fields):
+        """True if the address is a duplicate; otherwise remember it."""
+        base = tuple(fields)
+        c, r = self.CELL, self.NEAR
+        gx, gy = int(x // c), int(y // c)
+        gxs, gys = [gx], [gy]
+        if x - gx * c < r:
+            gxs.append(gx - 1)
+        elif (gx + 1) * c - x < r:
+            gxs.append(gx + 1)
+        if y - gy * c < r:
+            gys.append(gy - 1)
+        elif (gy + 1) * c - y < r:
+            gys.append(gy + 1)
+        for cx in gxs:
+            for cy in gys:
+                if self._key(base, cx, cy) in self.seen:
+                    return True
+        self.seen.add(self._key(base, gx, gy))
+        return False
 
 
 def split_housenumbers(value):
@@ -179,17 +237,25 @@ def osm_to_hkby(pbf_path, out_path, bundesland, progress=None, cancel=None, deta
     tr = osr.CoordinateTransformation(src, dst)
 
     landschl = _LANDSCHL.get(bundesland, '')
-    seen = set()
-    pending = []              # rows without municipality -> after the boundaries
+    # Duplicates are detected only once the municipality is final (for
+    # addresses without addr:city after the boundary lookup) — and only
+    # between nearby objects (see _DupIndex).
+    dups = _DupIndex()
+    pending = []              # addresses without municipality -> after the boundaries
     admin = _AdminAreas()
     stats = {'adressen': 0, 'doppelt': 0, 'gemeinde_ergaenzt': 0, 'ohne_gemeinde': 0,
              'objekte': 0}
     field_idx = {}
     last_pct = -1
 
-    def _row(oid, gmd, ott, street, hnr, adz, x, y, plz, city):
-        return ['N', oid[:16], '', landschl, bundesland, '', '', '', ott, '', gmd, '', ott, '',
-                street, hnr, adz, '32', f'{x:.2f}', f'{y:.2f}', plz, city, '', ott]
+    def _emit(fh, oid, gmd, ott, street, hnr, adz, x, y, plz):
+        if dups.check_add(x, y, street.lower(), hnr, adz.lower(), plz, gmd.lower()):
+            stats['doppelt'] += 1
+            return
+        row = hk_by_row(landschl, bundesland, ott, gmd, street, hnr, adz, '32', x, y, plz, gmd,
+                        ident=oid, ott=ott)
+        fh.write(';'.join(row) + '\r\n')
+        stats['adressen'] += 1
 
     with open(out_path, 'w', encoding='utf-8', newline='') as fh:
         fh.write(';'.join(HK_BY_HEADER) + '\r\n')
@@ -256,22 +322,16 @@ def osm_to_hkby(pbf_path, out_path, bundesland, progress=None, cancel=None, deta
             ott = _clean(val('addr:suburb'))
             oid = 'OSM' + {'points': 'N', 'lines': 'W', 'multipolygons': 'A'}[lname] + \
                   (val('osm_id') or val('osm_way_id'))
-            for hnr, adz in split_housenumbers(hn):
-                key = hash((street.lower(), hnr, adz.lower(), plz, city.lower()))
-                if key in seen:
-                    stats['doppelt'] += 1
-                    continue
-                seen.add(key)
-                row = _row(oid, city, ott, street, hnr, _clean(adz), x, y, plz, city)
-                if city:
-                    fh.write(';'.join(row) + '\r\n')
-                    stats['adressen'] += 1
-                else:
-                    pending.append((x, y, row))
+            numbers = [(hnr, _clean(adz)) for hnr, adz in split_housenumbers(hn)]
+            if city:
+                for hnr, adz in numbers:
+                    _emit(fh, oid, city, ott, street, hnr, adz, x, y, plz)
+            elif numbers:
+                pending.append((x, y, oid, ott, street, numbers, plz))
 
         # Addresses without addr:city: municipality from the boundaries
         _detail(f'OSM: {len(admin.areas)} Verwaltungsgrenzen, {len(pending)} Adressen ohne addr:city')
-        for i, (x, y, row) in enumerate(pending):
+        for i, (x, y, oid, ott, street, numbers, plz) in enumerate(pending):
             if i % 5000 == 0:
                 if cancel and cancel():
                     raise Cancelled()
@@ -279,13 +339,9 @@ def osm_to_hkby(pbf_path, out_path, bundesland, progress=None, cancel=None, deta
                     progress(i, len(pending), f'Gemeinde für Adressen ohne Ortsangabe ermitteln … '
                                               f'{i * 100 // max(len(pending), 1)} %')
             name = admin.lookup(x, y)
-            if name:
-                row[10] = row[21] = name
-                stats['gemeinde_ergaenzt'] += 1
-            else:
-                stats['ohne_gemeinde'] += 1
-            fh.write(';'.join(row) + '\r\n')
-            stats['adressen'] += 1
+            stats['gemeinde_ergaenzt' if name else 'ohne_gemeinde'] += len(numbers)
+            for hnr, adz in numbers:
+                _emit(fh, oid, name, ott, street, hnr, adz, x, y, plz)
     ds = None
     try:
         os.remove(cfg)

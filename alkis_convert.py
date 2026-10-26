@@ -21,7 +21,8 @@ import os
 import re
 import zipfile
 
-from .osm_convert import HK_BY_HEADER, split_housenumbers, _LANDSCHL, OsmConvertError
+from .osm_convert import (HK_BY_HEADER, split_housenumbers, _LANDSCHL, OsmConvertError,
+                          _clean, hk_by_row)
 
 DEFAULTS = {
     'gebaeude_layer':   'gebaeude',
@@ -64,8 +65,22 @@ def _gpkg_path(path):
     return path
 
 
-def _clean(v):
-    return (v or '').replace(';', ',').replace('\r', ' ').replace('\n', ' ').strip()
+def _zone_of(epsg):
+    """HK zone column for the target EPSG: 25832 -> '32', 25833 -> '33';
+    other codes are written in full (the import reads both forms)."""
+    epsg = int(epsg)
+    return str(epsg - 25800) if 25801 <= epsg <= 25860 else str(epsg)
+
+
+def _same_crs(a, b):
+    """True if both spatial references are the same — or one is unknown (the
+    LGLN GeoPackages carry no coordinate system; then both layers share it)."""
+    if a is None or b is None:
+        return True
+    try:
+        return bool(a.IsSame(b))
+    except Exception:
+        return a.ExportToWkt() == b.ExportToWkt()
 
 
 class _GemeindeRaster:
@@ -151,17 +166,28 @@ def alkis_to_rows(path, out_fh, bundesland, kreis='', cfg=None, cancel=None, see
         progress(0, 0, 'Gemeinden aus den Flurstücken …')
     raster = _GemeindeRaster(flst, cfg['gemeinde_feld'], cancel)
 
+    def _traditional(s):
+        try:
+            s.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
+        except AttributeError:
+            pass
+        return s
+
+    # Output: building points in the target EPSG. Municipality lookup: in the
+    # CRS of the PARCELS (the raster is built from their untransformed
+    # coordinates) — the point is looked up before the output transformation.
     tr = None
+    tr_lookup = None
     srs = geb.GetSpatialRef()
+    fl_srs = flst.GetSpatialRef()
     if srs is not None and srs.GetAuthorityCode(None) not in (None, str(cfg['epsg'])):
         dst = osr.SpatialReference()
         dst.ImportFromEPSG(int(cfg['epsg']))
-        try:
-            srs.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
-            dst.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
-        except AttributeError:
-            pass
-        tr = osr.CoordinateTransformation(srs, dst)
+        tr = osr.CoordinateTransformation(_traditional(srs.Clone()), _traditional(dst))
+    if not _same_crs(srs, fl_srs):
+        tr_lookup = osr.CoordinateTransformation(_traditional(srs.Clone()),
+                                                 _traditional(fl_srs.Clone()))
+    zone = _zone_of(cfg['epsg'])
 
     defn = geb.GetLayerDefn()
     i_str, i_hnr = defn.GetFieldIndex(cfg['strasse']), defn.GetFieldIndex(cfg['hausnummer'])
@@ -191,24 +217,30 @@ def alkis_to_rows(path, out_fh, bundesland, kreis='', cfg=None, cancel=None, see
             p = g.PointOnSurface() if g.GetDimension() == 2 else g.Centroid()
             if p is None or p.IsEmpty():
                 continue
+            if tr_lookup is not None:
+                q = p.Clone()
+                q.Transform(tr_lookup)
+                lx, ly = q.GetX(), q.GetY()
+            else:
+                lx, ly = p.GetX(), p.GetY()
             if tr is not None:
                 p.Transform(tr)
             x, y = p.GetX(), p.GetY()
         except Exception:
             continue
         st['gebaeude'] += 1
-        gmd = raster.lookup(x, y)
+        gmd = raster.lookup(lx, ly)
         if not gmd:
             st['ohne_gemeinde'] += 1
         for hnr, adz in split_housenumbers(hn):
+            adz = _clean(adz)
             key = hash((strasse.lower(), hnr, adz.lower(), gmd))
             if key in seen:
                 st['doppelt'] += 1
                 continue
             seen.add(key)
-            row = ['N', _clean(str(f.GetFID()))[:16], 'A', landschl, bundesland, '', '', '', kreis,
-                   '', gmd, '', '', '', strasse, hnr, _clean(adz), '32',
-                   f'{x:.2f}', f'{y:.2f}', '', gmd, '', '']
+            row = hk_by_row(landschl, bundesland, kreis, gmd, strasse, hnr, adz, zone, x, y, '',
+                            gmd, ident=f.GetFID(), qua='A')
             out_fh.write(';'.join(row) + '\r\n')
             st['adressen'] += 1
     ds = None

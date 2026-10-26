@@ -29,7 +29,8 @@ def _default_db_path():
     except Exception:
         profile_dir = ''
     if profile_dir:
-        return os.path.join(profile_dir, 'gis_akademie_geocoder', 'geocoder.db')
+        # normpath: QGIS returns the profile with '/', os.path.join appends '\'
+        return os.path.normpath(os.path.join(profile_dir, 'gis_akademie_geocoder', 'geocoder.db'))
     return _legacy_db_path()
 
 
@@ -40,7 +41,7 @@ def _user_catalog_path():
     except Exception:
         profile_dir = ''
     base = profile_dir or os.path.dirname(__file__)
-    return os.path.join(base, 'gis_akademie_geocoder', 'sources_user.json')
+    return os.path.normpath(os.path.join(base, 'gis_akademie_geocoder', 'sources_user.json'))
 
 
 def resolve_db_path(settings):

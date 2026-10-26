@@ -1412,7 +1412,12 @@ def _update_ogcapi(bundesland, entry, http, cache, prev_meta, force, progress, _
         while url:
             if cancel and cancel():
                 raise Cancelled()
-            data = _ogc_get_json(http, url)
+            try:
+                data = _ogc_get_json(http, url)
+            except SourceError:
+                if not (ids and total):
+                    raise
+                break        # a further page is not available — the count check decides below
             if not isinstance(data, dict):
                 raise SourceError('Der Dienst hat keine lesbaren Daten geliefert. Bitte später '
                                   'erneut versuchen.', detail=f'keine FeatureCollection von {url}')

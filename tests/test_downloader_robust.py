@@ -290,3 +290,15 @@ def test_test_source_never_raises():
     ok, txt = sd.test_source({'typ': 'gaialight', 'url': 'https://x', 'format': 'hkde',
                               'objekt': 'hk'}, http=Boom())
     assert not ok and 'TimeoutError' in txt
+
+
+def test_template_look_back_from_catalog():
+    url = 'https://x/{datum}/hk-{jahr}-{nr}.zip'
+    std = sd.url_template_candidates(url, date(2026, 10, 26))
+    assert len(std) == 2 * 2 * 12
+    short = sd.url_template_candidates(url, date(2026, 10, 26), tage=1, jahre=1, nr=3)
+    assert short == ['https://x/20261026/hk-2026-03.zip', 'https://x/20261026/hk-2026-02.zip',
+                     'https://x/20261026/hk-2026-01.zip']
+    with pytest.raises(sd.SourceError):
+        sd.validate_catalog({'sources': {'X': {'typ': 'direct', 'url': url, 'format': 'hkde',
+                                               'vorlage_jahre': 0}}})

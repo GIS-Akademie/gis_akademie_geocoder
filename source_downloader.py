@@ -405,6 +405,9 @@ def validate_catalog(cat):
             bb = e.get('kachel_bbox')
             if not e.get('kachel_crs') or not (isinstance(bb, list) and len(bb) == 4):
                 raise SourceError(f'{bl}: kacheln braucht kachel_crs und kachel_bbox [x0,y0,x1,y1]')
+        for key, top in (('vorlage_tage', 31), ('vorlage_jahre', 5), ('vorlage_nr', 52)):
+            if key in e and not (isinstance(e[key], int) and 1 <= e[key] <= top):
+                raise SourceError(f'{bl}: {key} muss eine ganze Zahl von 1 bis {top} sein')
         if typ == MANUAL_TYPE and not e.get('grund'):
             raise SourceError(f'{bl}: grund fehlt (warum manuell?)')
         for key in ('datei_muster', 'link_muster', 'ressource_muster', 'entpacken'):
@@ -585,19 +588,29 @@ def _absolute(base, link):
     return urllib.parse.urljoin(base, html.unescape(link.strip()))
 
 
-def url_template_candidates(url, today=None):
+TEMPLATE_DAYS  = 2      # {datum}: today and yesterday (catalog field 'vorlage_tage')
+TEMPLATE_YEARS = 2      # {jahr}: current and previous year ('vorlage_jahre')
+TEMPLATE_NR    = 12     # {nr}: releases 12 down to 1 ('vorlage_nr')
+
+
+def url_template_candidates(url, today=None, tage=TEMPLATE_DAYS, jahre=TEMPLATE_YEARS,
+                            nr=TEMPLATE_NR):
     """Candidates for a URL with placeholders, newest first:
-      {datum} — today's date YYYYMMDD (then yesterday, in case the server does
-                not have today's folder yet),
+      {datum} — today's date YYYYMMDD, then the days before (in case the
+                server does not have today's folder yet),
       {jahr}/{nr} — data release, e.g. "-2026-01": current and previous
-                year, number 12 down to 1 (two digits).
+                year(s), number nr down to 1 (two digits).
+    The look-back ranges come from the catalog entry (vorlage_tage,
+    vorlage_jahre, vorlage_nr), so they can be changed with the online list.
     Example Hessen: …/downloadcenter/{datum}/…/Hauskoordinaten…-{jahr}-{nr}.zip"""
     from datetime import date, timedelta
     today = today or date.today()
-    tage = [today, today - timedelta(days=1)] if '{datum}' in url else [today]
+    tage = ([today - timedelta(days=d) for d in range(max(1, int(tage)))]
+            if '{datum}' in url else [today])
+    jahre = [today.year - k for k in range(max(1, int(jahre)))]
     if '{jahr}' in url or '{nr}' in url:
-        fassungen = [(j, n) for j in (today.year, today.year - 1)
-                     for n in range(12, 0, -1)] if '{nr}' in url else                     [(j, 1) for j in (today.year, today.year - 1)]
+        fassungen = ([(j, n) for j in jahre for n in range(max(1, int(nr)), 0, -1)]
+                     if '{nr}' in url else [(j, 1) for j in jahre])
     else:
         fassungen = [(today.year, 1)]
     out = []
@@ -614,14 +627,18 @@ def _is_html(headers):
     return 'text/html' in str((headers or {}).get('content-type', '')).lower()
 
 
-def resolve_url_template(url, http, today=None):
+def resolve_url_template(url, http, today=None, entry=None):
     """First existing URL from url_template_candidates — checked by fetching
     the first bytes (some servers do not allow HEAD requests). A candidate
     counts as missing on 404/403 or when the server answers with a web page
     instead of a file; a network problem or server error ends the search at
     once (it would affect every candidate)."""
     tried = []
-    for cand in url_template_candidates(url, today):
+    entry = entry or {}
+    for cand in url_template_candidates(url, today,
+                                        entry.get('vorlage_tage', TEMPLATE_DAYS),
+                                        entry.get('vorlage_jahre', TEMPLATE_YEARS),
+                                        entry.get('vorlage_nr', TEMPLATE_NR)):
         try:
             status, h, _b = http.get(cand, headers={'Range': 'bytes=0-3'}, max_bytes=4)
         except SourceError as e:
@@ -666,7 +683,7 @@ def resolve_download_urls(entry, http):
     url = entry['url']
     if typ == 'direct':
         if '{' in url:
-            return [resolve_url_template(url, http)]
+            return [resolve_url_template(url, http, entry=entry)]
         return [url]
 
     if typ == 'index_json':

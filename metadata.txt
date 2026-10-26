@@ -12,7 +12,7 @@ about=Geocodes address tables (CSV, Excel .xlsx/.xls, OpenDocument .ods, tab-sep
 
   Missing postcodes are added automatically from the bundled postcode areas (derived directly from OpenStreetMap, © OpenStreetMap contributors, ODbL).
 
-  Requirements: none beyond QGIS (uses GDAL/OGR from QGIS). Region: Germany only. The user interface and documentation are in German.
+  Requirements: none beyond QGIS (uses GDAL/OGR from QGIS). Optional: reading old Excel .xls files needs the Python package xlrd (OSGeo4W Shell: python -m pip install xlrd). Region: Germany only. The user interface and documentation are in German.
 
   Data licences: official house coordinates mostly dl-de/by-2-0 (Berlin dl-de/zero-2-0, Bremen CC BY 4.0); OpenStreetMap data and the bundled postcode areas ODbL 1.0. Please follow the attribution rules of each source (see the built-in help).
 

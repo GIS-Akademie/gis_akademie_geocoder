@@ -302,3 +302,15 @@ def test_template_look_back_from_catalog():
     with pytest.raises(sd.SourceError):
         sd.validate_catalog({'sources': {'X': {'typ': 'direct', 'url': url, 'format': 'hkde',
                                                'vorlage_jahre': 0}}})
+
+
+def test_every_source_type_is_complete():
+    """B51: one registry — every type can be validated, fetched and tested."""
+    for typ, t in sd.SOURCE_TYPES.items():
+        assert t.label and t.formats
+        if typ == sd.MANUAL_TYPE:
+            continue
+        assert t.test is not None, typ
+        if t.automatic:
+            assert (t.urls is None) != (t.update is None), typ    # exactly one fetch route
+    assert list(sd.EDITABLE_TYPES)[0] == 'datei' and 'manuell' not in sd.EDITABLE_TYPES

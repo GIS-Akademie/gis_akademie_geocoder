@@ -62,45 +62,61 @@ BUNDESLAENDER = (
     'Schleswig-Holstein', 'Thüringen',
 )
 
-TYPE_LABELS = {
-    'datei':      'Datei auf diesem Rechner',
-    'direct':     'Feste Datei-URL',
-    'index_json': 'Verzeichnisindex (index.json)',
-    'page_link':  'Link auf einer Webseite (Regex)',
-    'atom':       'Atom-Feed (Regex)',
-    'rss':        'RSS-Feed (Regex)',
-    'ckan':       'CKAN-Datenkatalog (API)',
-    'wfs':        'WFS 2.0 (seitenweise GML)',
-    'index_geojson': 'Dateiliste als GeoJSON (je Kreis eine Datei)',
-    'gaialight':  'GaiaLight-Downloaddienst (Auftrag)',
-    'ogcapi':     'OGC API Features (GeoJSON-Seiten)',
-    'manuell':    'manuell',
-}
-
-AUTOMATIC_TYPES = ('direct', 'index_json', 'page_link', 'atom', 'rss', 'ckan', 'wfs',
-                   'index_geojson', 'gaialight', 'ogcapi')
-FILE_TYPE       = 'datei'      # registered file on this computer (path instead of URL)
-MANUAL_TYPE     = 'manuell'
-FORMATS         = ('hkde', 'gml', 'shp', 'osm', 'alkis', 'geojson')
+FORMATS = ('hkde', 'gml', 'shp', 'osm', 'alkis', 'geojson')
 # osm: OpenStreetMap extract (.osm.pbf); alkis: ALKIS GeoPackage with buildings and land parcels
-
-# Data formats each fetch type can deliver to the import — the single place
-# that validation, the source editor and the online list check against.
 _FILE_FORMATS = ('hkde', 'gml', 'shp', 'osm')
-TYPE_FORMATS = {
-    'datei':         _FILE_FORMATS,
-    'direct':        _FILE_FORMATS,
-    'index_json':    _FILE_FORMATS,
-    'page_link':     _FILE_FORMATS,
-    'atom':          _FILE_FORMATS,
-    'rss':           _FILE_FORMATS,
-    'ckan':          _FILE_FORMATS,
-    'wfs':           ('gml',),
-    'index_geojson': ('alkis',),
-    'gaialight':     ('hkde', 'gml', 'shp'),
-    'ogcapi':        ('geojson',),
-    'manuell':       FORMATS,
+
+
+class SourceType:
+    """Everything the plugin knows about one fetch type — the single place that
+    validation, download, test and the source editor use:
+      label     — name in the user interface
+      formats   — data formats this type can deliver to the import
+      automatic — fetched from the internet without user intervention
+      needs     — required catalog fields: ((field, …), message), …
+      check     — further validation check(bl, entry) (optional)
+      urls      — urls(entry, http) → file URLs, for types that deliver files
+      update    — update(ctx) → result, for types with their own fetch logic
+      test      — test(entry, http) → (ok, text) for „Quelle prüfen“
+    The functions are assigned at the end of the module."""
+
+    def __init__(self, label, formats, automatic=True, needs=()):
+        self.label, self.formats, self.automatic, self.needs = label, formats, automatic, needs
+        self.check = self.urls = self.update = self.test = None
+
+
+SOURCE_TYPES = {
+    'datei':         SourceType('Datei auf diesem Rechner', _FILE_FORMATS, automatic=False,
+                                needs=((('pfad',), 'Bitte eine Datei auswählen.'),)),
+    'direct':        SourceType('Feste Datei-URL', _FILE_FORMATS),
+    'index_json':    SourceType('Verzeichnisindex (index.json)', _FILE_FORMATS,
+                                needs=((('datei_muster',), 'Bitte ein Dateiname-Muster angeben.'),)),
+    'page_link':     SourceType('Link auf einer Webseite (Regex)', _FILE_FORMATS,
+                                needs=((('link_muster',), 'Bitte ein Link-Muster angeben.'),)),
+    'atom':          SourceType('Atom-Feed (Regex)', _FILE_FORMATS,
+                                needs=((('link_muster',), 'Bitte ein Link-Muster angeben.'),)),
+    'rss':           SourceType('RSS-Feed (Regex)', _FILE_FORMATS,
+                                needs=((('link_muster',), 'Bitte ein Link-Muster angeben.'),)),
+    'ckan':          SourceType('CKAN-Datenkatalog (API)', _FILE_FORMATS,
+                                needs=((('abfrage', 'ressource_muster'),
+                                        'Bitte CKAN-Abfrage und Ressourcen-Muster angeben.'),)),
+    'wfs':           SourceType('WFS 2.0 (seitenweise GML)', ('gml',),
+                                needs=((('typnamen',), 'Bitte die WFS-Typnamen angeben.'),)),
+    'index_geojson': SourceType('Dateiliste als GeoJSON (je Kreis eine Datei)', ('alkis',)),
+    'gaialight':     SourceType('GaiaLight-Downloaddienst (Auftrag)', ('hkde', 'gml', 'shp'),
+                                needs=((('objekt',), 'Bitte das Objekt des Downloaddienstes '
+                                        'angeben (z.B. hk_alkis).'),)),
+    'ogcapi':        SourceType('OGC API Features (GeoJSON-Seiten)', ('geojson',)),
+    'manuell':       SourceType('manuell', FORMATS, automatic=False,
+                                needs=((('grund',), 'grund fehlt (warum manuell?)'),)),
 }
+FILE_TYPE   = 'datei'      # registered file on this computer (path instead of URL)
+MANUAL_TYPE = 'manuell'
+# Derived views (used by the user interface and older callers)
+TYPE_LABELS     = {k: t.label for k, t in SOURCE_TYPES.items()}
+TYPE_FORMATS    = {k: t.formats for k, t in SOURCE_TYPES.items()}
+AUTOMATIC_TYPES = tuple(k for k, t in SOURCE_TYPES.items() if t.automatic)
+EDITABLE_TYPES  = tuple(k for k in SOURCE_TYPES if k != MANUAL_TYPE)
 
 CHUNK = 1024 * 256
 
@@ -364,52 +380,31 @@ def validate_catalog(cat):
         raise SourceError('sources.json: "sources" fehlt oder ist leer')
     for bl, e in cat['sources'].items():
         typ = e.get('typ')
-        if typ not in AUTOMATIC_TYPES + (FILE_TYPE, MANUAL_TYPE):
+        t = SOURCE_TYPES.get(typ)
+        if t is None:
             raise SourceError(f'{bl}: unbekannter typ {typ!r}')
         if e.get('format') not in FORMATS:
             raise SourceError(f'{bl}: unbekanntes format {e.get("format")!r}')
-        if e['format'] not in TYPE_FORMATS[typ]:
+        if e['format'] not in t.formats:
             raise SourceError(f'{bl}: Das Datenformat {e["format"]!r} passt nicht zur Bezugsart '
-                              f'{TYPE_LABELS.get(typ, typ)!r}.')
-        if typ == FILE_TYPE:
-            if not e.get('pfad'):
-                raise SourceError(f'{bl}: Bitte eine Datei auswählen.')
-        elif not e.get('url'):
+                              f'{t.label!r}.')
+        if typ != FILE_TYPE and not e.get('url'):
             raise SourceError(f'{bl}: Bitte eine URL angeben.')
+        for keys, message in t.needs:
+            if not all(e.get(k) for k in keys):
+                raise SourceError(f'{bl}: {message}')
+        if t.check:
+            t.check(bl, e)
         if e.get('format') == 'shp' and typ != MANUAL_TYPE:
-            felder = e.get('felder') or {}
-            if not (felder.get('strasse') and felder.get('hausnummer')):
-                raise SourceError(f'{bl}: Bitte im Shapefile mindestens die Felder für Straße '
-                                  'und Hausnummer zuordnen.')
-        if typ == 'index_json' and not e.get('datei_muster'):
-            raise SourceError(f'{bl}: Bitte ein Dateiname-Muster angeben.')
-        if typ in ('page_link', 'atom', 'rss') and not e.get('link_muster'):
-            raise SourceError(f'{bl}: Bitte ein Link-Muster angeben.')
-        if typ == 'ckan' and not (e.get('abfrage') and e.get('ressource_muster')):
-            raise SourceError(f'{bl}: Bitte CKAN-Abfrage und Ressourcen-Muster angeben.')
-        if typ == 'ogcapi':
-            felder = e.get('felder') or {}
-            if not (felder.get('strasse') and felder.get('hausnummer')):
-                raise SourceError(f'{bl}: Bitte die Felder für Straße und Hausnummer angeben.')
+            _check_felder(bl, e, 'Bitte im Shapefile mindestens die Felder für Straße und '
+                                 'Hausnummer zuordnen.')
         if e.get('ausweich'):
             if not isinstance(e['ausweich'], dict) or e['ausweich'].get('typ') not in AUTOMATIC_TYPES:
                 raise SourceError(f'{bl}: Die Ausweichquelle muss eine Internetquelle sein.')
             validate_catalog({'sources': {f'{bl} (Ausweichquelle)': e['ausweich']}})
-        if typ == 'gaialight' and not e.get('objekt'):
-            raise SourceError(f'{bl}: Bitte das Objekt des Downloaddienstes angeben (z.B. hk_alkis).')
-        if typ == 'wfs' and not e.get('typnamen'):
-            raise SourceError(f'{bl}: Bitte die WFS-Typnamen angeben.')
-        if typ == 'wfs' and e.get('abruf', 'seiten') not in ('seiten', 'kacheln'):
-            raise SourceError(f'{bl}: abruf muss "seiten" oder "kacheln" sein')
-        if typ == 'wfs' and e.get('abruf') == 'kacheln':
-            bb = e.get('kachel_bbox')
-            if not e.get('kachel_crs') or not (isinstance(bb, list) and len(bb) == 4):
-                raise SourceError(f'{bl}: kacheln braucht kachel_crs und kachel_bbox [x0,y0,x1,y1]')
         for key, top in (('vorlage_tage', 31), ('vorlage_jahre', 5), ('vorlage_nr', 52)):
             if key in e and not (isinstance(e[key], int) and 1 <= e[key] <= top):
                 raise SourceError(f'{bl}: {key} muss eine ganze Zahl von 1 bis {top} sein')
-        if typ == MANUAL_TYPE and not e.get('grund'):
-            raise SourceError(f'{bl}: grund fehlt (warum manuell?)')
         for key in ('datei_muster', 'link_muster', 'ressource_muster', 'entpacken'):
             if e.get(key):
                 try:
@@ -417,6 +412,21 @@ def validate_catalog(cat):
                 except re.error as err:
                     raise SourceError(f'{bl}: Das Muster „{e[key]}“ ist kein gültiger '
                                       f'regulärer Ausdruck ({err}).')
+
+
+def _check_felder(bl, e, message='Bitte die Felder für Straße und Hausnummer angeben.'):
+    felder = e.get('felder') or {}
+    if not (felder.get('strasse') and felder.get('hausnummer')):
+        raise SourceError(f'{bl}: {message}')
+
+
+def _check_wfs(bl, e):
+    if e.get('abruf', 'seiten') not in ('seiten', 'kacheln'):
+        raise SourceError(f'{bl}: abruf muss "seiten" oder "kacheln" sein')
+    if e.get('abruf') == 'kacheln':
+        bb = e.get('kachel_bbox')
+        if not e.get('kachel_crs') or not (isinstance(bb, list) and len(bb) == 4):
+            raise SourceError(f'{bl}: kacheln braucht kachel_crs und kachel_bbox [x0,y0,x1,y1]')
 
 
 def user_agent(version='dev', catalog=None):
@@ -677,78 +687,86 @@ def index_geojson_urls(entry, http):
 
 
 def resolve_download_urls(entry, http):
-    """Returns the list of file URLs to download for an entry
-    (not for wfs/manuell)."""
-    typ = entry['typ']
+    """Returns the list of file URLs to download for an entry (types that
+    deliver files: direct, index_json, page_link/atom/rss, ckan)."""
+    urls = SOURCE_TYPES[entry['typ']].urls
+    if urls is None:
+        raise SourceError(f'Typ {entry["typ"]!r} hat keine Datei-URLs')
+    return urls(entry, http)
+
+
+def _urls_direct(entry, http):
     url = entry['url']
-    if typ == 'direct':
-        if '{' in url:
-            return [resolve_url_template(url, http, entry=entry)]
-        return [url]
+    return [resolve_url_template(url, http, entry=entry)] if '{' in url else [url]
 
-    if typ == 'index_json':
-        status, _, body = http.get(url)
-        try:
-            idx = json.loads(body.decode('utf-8'))
-            if not isinstance(idx, dict):
-                raise ValueError('kein Objekt')
-        except ValueError as e:
-            raise SourceError('Die Dateiliste der Quelle ist nicht lesbar.',
-                              detail=f'index.json nicht lesbar: {url}') from e
-        pat   = re.compile(entry['datei_muster'])
-        names = []
-        for ds in idx.get('datasets', []):
-            for f in ds.get('files', []):
-                if pat.search(f.get('name', '')):
-                    names.append(f['name'])
-        if not names:
-            raise SourceError(_SOURCE_CHANGED, kind='geaendert', detail=f'Keine Datei passend zu '
-                              f'{entry["datei_muster"]!r} im Index {url}')
-        return [_absolute(url, n) for n in sorted(set(names))]
 
-    if typ in ('page_link', 'atom', 'rss'):
-        status, _, body = http.get(url)
-        text  = body.decode('utf-8', 'replace')
-        links = re.findall(entry['link_muster'], text)
-        links = [l if isinstance(l, str) else l[0] for l in links]
-        if not links:
-            raise SourceError(_SOURCE_CHANGED, kind='geaendert', detail=f'Kein Link passend zu '
-                              f'{entry["link_muster"]!r} auf {url}')
-        seen, out = set(), []
-        for l in links:
-            a = _absolute(url, l)
-            if a not in seen:
-                seen.add(a)
-                out.append(a)
-        return out
+def _urls_index_json(entry, http):
+    url = entry['url']
+    _status, _, body = http.get(url)
+    try:
+        idx = json.loads(body.decode('utf-8'))
+        if not isinstance(idx, dict):
+            raise ValueError('kein Objekt')
+    except ValueError as e:
+        raise SourceError('Die Dateiliste der Quelle ist nicht lesbar.',
+                          detail=f'index.json nicht lesbar: {url}') from e
+    pat   = re.compile(entry['datei_muster'])
+    names = []
+    for ds in idx.get('datasets', []):
+        for f in ds.get('files', []):
+            if pat.search(f.get('name', '')):
+                names.append(f['name'])
+    if not names:
+        raise SourceError(_SOURCE_CHANGED, kind='geaendert', detail=f'Keine Datei passend zu '
+                          f'{entry["datei_muster"]!r} im Index {url}')
+    return [_absolute(url, n) for n in sorted(set(names))]
 
-    if typ == 'ckan':
-        q = urllib.parse.urlencode({'q': entry['abfrage'], 'rows': entry.get('rows', 10),
-                                    'sort': 'metadata_modified desc'})
-        status, _, body = http.get(f'{url}?{q}')
-        try:
-            data = json.loads(body.decode('utf-8'))
-            if not isinstance(data, dict):
-                raise ValueError('kein Objekt')
-        except ValueError as e:
-            raise SourceError('Die Antwort des Datenportals ist nicht lesbar.',
-                              detail=f'CKAN-Antwort nicht lesbar: {url}') from e
-        pat  = re.compile(entry['ressource_muster'], re.IGNORECASE)
-        best = None   # (date, url)
-        for pkg in data.get('result', {}).get('results', []):
-            for res in pkg.get('resources', []):
-                u = res.get('url', '')
-                m = pat.search(u)
-                if m:
-                    key = m.group(1) if m.groups() else (res.get('created') or '')
-                    if best is None or key > best[0]:
-                        best = (key, u)
-        if not best:
-            raise SourceError(_SOURCE_CHANGED, kind='geaendert', detail=f'Keine CKAN-Ressource passend zu '
-                              f'{entry["ressource_muster"]!r}')
-        return [best[1]]
 
-    raise SourceError(f'Typ {typ!r} hat keine Datei-URLs')
+def _urls_links(entry, http):
+    """page_link / atom / rss: file links found with a regex."""
+    url = entry['url']
+    _status, _, body = http.get(url)
+    text  = body.decode('utf-8', 'replace')
+    links = re.findall(entry['link_muster'], text)
+    links = [l if isinstance(l, str) else l[0] for l in links]
+    if not links:
+        raise SourceError(_SOURCE_CHANGED, kind='geaendert', detail=f'Kein Link passend zu '
+                          f'{entry["link_muster"]!r} auf {url}')
+    seen, out = set(), []
+    for l in links:
+        a = _absolute(url, l)
+        if a not in seen:
+            seen.add(a)
+            out.append(a)
+    return out
+
+
+def _urls_ckan(entry, http):
+    url = entry['url']
+    q = urllib.parse.urlencode({'q': entry['abfrage'], 'rows': entry.get('rows', 10),
+                                'sort': 'metadata_modified desc'})
+    _status, _, body = http.get(f'{url}?{q}')
+    try:
+        data = json.loads(body.decode('utf-8'))
+        if not isinstance(data, dict):
+            raise ValueError('kein Objekt')
+    except ValueError as e:
+        raise SourceError('Die Antwort des Datenportals ist nicht lesbar.',
+                          detail=f'CKAN-Antwort nicht lesbar: {url}') from e
+    pat  = re.compile(entry['ressource_muster'], re.IGNORECASE)
+    best = None   # (date, url)
+    for pkg in data.get('result', {}).get('results', []):
+        for res in pkg.get('resources', []):
+            u = res.get('url', '')
+            m = pat.search(u)
+            if m:
+                key = m.group(1) if m.groups() else (res.get('created') or '')
+                if best is None or key > best[0]:
+                    best = (key, u)
+    if not best:
+        raise SourceError(_SOURCE_CHANGED, kind='geaendert', detail=f'Keine CKAN-Ressource passend zu '
+                          f'{entry["ressource_muster"]!r}')
+    return [best[1]]
 
 
 # ── Download & extraction ────────────────────────────────────────────────────
@@ -1175,19 +1193,21 @@ def update_source(bundesland, db_path, prev_meta=None, force=False,
     entry = cat['sources'].get(bundesland)
     if not entry:
         raise SourceError(f'Für {bundesland} ist keine Quelle hinterlegt.')
-    if is_file_source(entry):
-        return _update_from_file(bundesland, entry, db_path, prev_meta, force, log, detail)
-    if not is_automatic(entry):
+    t = SOURCE_TYPES.get(entry.get('typ'))
+    if t is None or (not t.automatic and t.update is None):
         return {'status': 'manual', 'files': [], 'format': entry.get('format'),
                 'entry': entry, 'meta': None,
                 'text': manual_text(bundesland, entry)}
+    ctx = _Ctx(bundesland=bundesland, entry=entry, db_path=db_path, prev_meta=prev_meta,
+               force=force, progress=progress, cancel=cancel,
+               log=log or (lambda m: None), detail=detail or (lambda m: None))
+    if not t.automatic:                      # file on this computer
+        return t.update(ctx)
 
-    http = http or Http(user_agent(user_agent_version, cat))
-    cache = cache_dir_for(db_path, bundesland)
-    os.makedirs(cache, exist_ok=True)
-    _log    = log or (lambda m: None)
-    _detail = detail or (lambda m: None)
-    _detail(f'{bundesland}: Quelle {entry.get("url")} (Typ {entry["typ"]}), Cache {cache}')
+    ctx.http = http or Http(user_agent(user_agent_version, cat))
+    ctx.cache = cache_dir_for(db_path, bundesland)
+    os.makedirs(ctx.cache, exist_ok=True)
+    ctx.detail(f'{bundesland}: Quelle {entry.get("url")} (Typ {entry["typ"]}), Cache {ctx.cache}')
 
     # Lock after a download (min_abstand_tage): NOT a schedule — the plugin never
     # downloads on its own. When updating, the source is only skipped as long as
@@ -1210,45 +1230,52 @@ def update_source(bundesland, db_path, prev_meta=None, force=False,
                             f'Aktualisieren übersprungen, solange der letzte Abruf weniger als '
                             f'{tage} Tage zurückliegt – sofort laden mit „Auch ohne neue Daten '
                             'erneut laden“.'}
+    return (t.update or _update_files)(ctx)
 
-    if entry['typ'] == 'index_geojson':
-        return _update_index_geojson(bundesland, entry, http, prev_meta, force, _log, _detail)
 
-    if entry['typ'] == 'ogcapi':
-        return _update_ogcapi(bundesland, entry, http, cache, prev_meta, force,
-                              progress, _log, _detail, cancel)
+class _Ctx:
+    """Everything a fetch function needs (see update_source)."""
 
-    if entry['typ'] == 'gaialight':
-        return _update_gaialight(bundesland, entry, http, cache, prev_meta, force,
-                                 progress, _log, _detail, cancel)
+    def __init__(self, **kw):
+        self.http = self.cache = None
+        self.__dict__.update(kw)
 
-    if entry['typ'] == 'wfs':
-        _log_source(_log, entry)
-        _log('Lade Adressen vom Dienst der Landesvermessung'
-             + (f' – das dauert {entry["dauer"]} …' if entry.get('dauer') else ' …'))
 
-        def _wfs_progress(done, total, label):
-            if progress:
-                txt = (f'{_n(done)} von {_n(total)} {label} geladen …' if total
-                       else f'{_n(done)} {label} geladen …')
-                progress(done, total, txt)
+def _update_wfs(c):
+    entry, progress, cancel, prev_meta, force = c.entry, c.progress, c.cancel, c.prev_meta, c.force
+    http, cache, _log, _detail = c.http, c.cache, c.log, c.detail
+    _log_source(_log, entry)
+    _log('Lade Adressen vom Dienst der Landesvermessung'
+         + (f' – das dauert {entry["dauer"]} …' if entry.get('dauer') else ' …'))
 
-        shas = []
-        files = fetch_wfs(entry, cache, http, progress=_wfs_progress, cancel=cancel, log=_detail,
-                          shas=shas)
-        if cancel and cancel():
-            raise Cancelled()
-        size = sum(os.path.getsize(f) for f in files)
-        # Checksum over the per-file checksums of the download (no second read)
-        digest = hashlib.sha256('\n'.join(shas).encode('ascii')).hexdigest()
-        if prev_meta and not force and prev_meta.get('sha256') == digest:
-            return _unchanged(entry)
-        _log(f'Download abgeschlossen ({_mb(size)} MB).')
-        _detail(f'{len(files)} GML-Dateien, SHA-256 {digest}')
-        meta = _meta(entry, sha256=digest, dateien=';'.join(os.path.basename(f) for f in files))
-        return {'status': 'downloaded', 'files': files, 'format': entry['format'],
-                'entry': entry, 'meta': meta, 'text': ''}
+    def _wfs_progress(done, total, label):
+        if progress:
+            txt = (f'{_n(done)} von {_n(total)} {label} geladen …' if total
+                   else f'{_n(done)} {label} geladen …')
+            progress(done, total, txt)
 
+    shas = []
+    files = fetch_wfs(entry, cache, http, progress=_wfs_progress, cancel=cancel, log=_detail,
+                      shas=shas)
+    if cancel and cancel():
+        raise Cancelled()
+    size = sum(os.path.getsize(f) for f in files)
+    # Checksum over the per-file checksums of the download (no second read)
+    digest = hashlib.sha256('\n'.join(shas).encode('ascii')).hexdigest()
+    if prev_meta and not force and prev_meta.get('sha256') == digest:
+        return _unchanged(entry)
+    _log(f'Download abgeschlossen ({_mb(size)} MB).')
+    _detail(f'{len(files)} GML-Dateien, SHA-256 {digest}')
+    meta = _meta(entry, sha256=digest, dateien=';'.join(os.path.basename(f) for f in files))
+    return {'status': 'downloaded', 'files': files, 'format': entry['format'],
+            'entry': entry, 'meta': meta, 'text': ''}
+
+
+def _update_files(c):
+    """Types that deliver files: resolve the URLs, download (conditionally),
+    extract."""
+    entry, progress, cancel, prev_meta, force = c.entry, c.progress, c.cancel, c.prev_meta, c.force
+    http, cache, _log, _detail = c.http, c.cache, c.log, c.detail
     _log_source(_log, entry)
     if entry.get('dauer'):
         _log(f'Download und Import dauern {entry["dauer"]}.')
@@ -1696,41 +1723,56 @@ def test_source(entry, http=None, user_agent_version='dev'):
 
 
 def _test_source(entry, http, user_agent_version):
-    if is_file_source(entry):
-        if not os.path.isfile(entry['pfad']):
-            return False, 'Die Datei wurde nicht gefunden.'
-        _etag, lm, size = file_signature(entry['pfad'])
-        return True, f'Datei vorhanden · {_mb(size)} MB · Stand {format_last_modified(lm)}'
-    if not is_automatic(entry):
+    t = SOURCE_TYPES[entry['typ']]
+    if t.test is None:
         return False, 'Manuelle Quellen werden nicht abgerufen.'
-    http = http or Http(user_agent(user_agent_version), timeout=30)
-    typ = entry['typ']
-    if typ == 'gaialight':
-        best = gaialight_latest(entry, http)
-        return True, f'Neuester Bestand: {best["bestand"]} vom {_datum_de(best["datum"][:10])}'
-    if typ == 'index_geojson':
-        urls = index_geojson_urls(entry, http)
-        return True, f'{len(urls)} Dateien in der Dateiliste, z.B. {_file_name_from_url(urls[0])}'
-    if typ == 'wfs':
-        typname = entry['typnamen'][-1]
-        n = wfs_hits(http, entry['url'], typname)
-        return True, f'Dienst erreichbar: {_n(n)} {_de(typname)}.'
-    if typ == 'ogcapi':
-        data = _ogc_get_json(http, _ogc_page_url(entry, 0, limit=1))
-        feats = data.get('features') if isinstance(data, dict) else None
-        if feats is None:
-            return False, 'Der Dienst antwortet, liefert aber keine Objekte – Adresse prüfen.'
-        total = data.get('numberMatched')
-        return True, ('Dienst erreichbar' + (f': {_n(total)} Adressen' if total else '') + '.')
+    if t.automatic:
+        http = http or Http(user_agent(user_agent_version), timeout=30)
+    return t.test(entry, http)
+
+
+def _test_file(entry, _http):
+    if not os.path.isfile(entry['pfad']):
+        return False, 'Die Datei wurde nicht gefunden.'
+    _etag, lm, size = file_signature(entry['pfad'])
+    return True, f'Datei vorhanden · {_mb(size)} MB · Stand {format_last_modified(lm)}'
+
+
+def _test_gaialight(entry, http):
+    best = gaialight_latest(entry, http)
+    return True, f'Neuester Bestand: {best["bestand"]} vom {_datum_de(best["datum"][:10])}'
+
+
+def _test_index_geojson(entry, http):
+    urls = index_geojson_urls(entry, http)
+    return True, f'{len(urls)} Dateien in der Dateiliste, z.B. {_file_name_from_url(urls[0])}'
+
+
+def _test_wfs(entry, http):
+    typname = entry['typnamen'][-1]
+    n = wfs_hits(http, entry['url'], typname)
+    return True, f'Dienst erreichbar: {_n(n)} {_de(typname)}.'
+
+
+def _test_ogcapi(entry, http):
+    data = _ogc_get_json(http, _ogc_page_url(entry, 0, limit=1))
+    feats = data.get('features') if isinstance(data, dict) else None
+    if feats is None:
+        return False, 'Der Dienst antwortet, liefert aber keine Objekte – Adresse prüfen.'
+    total = data.get('numberMatched')
+    return True, ('Dienst erreichbar' + (f': {_n(total)} Adressen' if total else '') + '.')
+
+
+def _test_files(entry, http):
     urls = resolve_download_urls(entry, http)
-    _s, hdrs, _b = http.get(urls[0], headers={'Range': 'bytes=0-3'}, max_bytes=4)
+    status, hdrs, _b = http.get(urls[0], headers={'Range': 'bytes=0-3'}, max_bytes=4)
     if _is_html(hdrs):
         return False, (f'Der Server {_host(urls[0])} liefert derzeit keine Datei, sondern eine '
                        'Webseite (z.B. Wartung).')
     size = hdrs.get('content-length')
     if hdrs.get('content-range', '').rpartition('/')[2].isdigit():
         size = hdrs['content-range'].rpartition('/')[2]
-    elif _s == 206:
+    elif status == 206:
         size = None
     stand = format_last_modified(hdrs.get('last-modified'))
     txt = f'{len(urls)} Datei(en) gefunden: ' + ', '.join(_file_name_from_url(u) for u in urls[:5])
@@ -1749,3 +1791,35 @@ def format_last_modified(value):
         return parsedate_to_datetime(value).strftime('%d.%m.%Y')
     except Exception:
         return value
+
+
+# ── Registry: functions per source type ──────────────────────────────────────
+
+def _register():
+    T = SOURCE_TYPES
+    T['datei'].update = lambda c: _update_from_file(c.bundesland, c.entry, c.db_path,
+                                                    c.prev_meta, c.force, c.log, c.detail)
+    T['datei'].test = _test_file
+    T['direct'].urls = _urls_direct
+    T['index_json'].urls = _urls_index_json
+    for typ in ('page_link', 'atom', 'rss'):
+        T[typ].urls = _urls_links
+    T['ckan'].urls = _urls_ckan
+    for typ in ('direct', 'index_json', 'page_link', 'atom', 'rss', 'ckan'):
+        T[typ].test = _test_files
+    T['wfs'].check, T['wfs'].update, T['wfs'].test = _check_wfs, _update_wfs, _test_wfs
+    T['index_geojson'].update = lambda c: _update_index_geojson(
+        c.bundesland, c.entry, c.http, c.prev_meta, c.force, c.log, c.detail)
+    T['index_geojson'].test = _test_index_geojson
+    T['gaialight'].update = lambda c: _update_gaialight(
+        c.bundesland, c.entry, c.http, c.cache, c.prev_meta, c.force, c.progress, c.log,
+        c.detail, c.cancel)
+    T['gaialight'].test = _test_gaialight
+    T['ogcapi'].check = _check_felder
+    T['ogcapi'].update = lambda c: _update_ogcapi(
+        c.bundesland, c.entry, c.http, c.cache, c.prev_meta, c.force, c.progress, c.log,
+        c.detail, c.cancel)
+    T['ogcapi'].test = _test_ogcapi
+
+
+_register()

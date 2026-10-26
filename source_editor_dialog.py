@@ -27,8 +27,7 @@ from . import source_downloader as _sd
 
 
 # Source types in the editor (file first — the most common case for portal states)
-_EDIT_TYPES = ['datei', 'direct', 'index_json', 'page_link', 'atom', 'rss', 'ckan', 'wfs',
-               'index_geojson', 'gaialight', 'ogcapi']
+_EDIT_TYPES = list(_sd.EDITABLE_TYPES)
 
 _TYPE_HELP = {
     'datei':      'Eine Adressdatei auf diesem Rechner oder einem Netzlaufwerk (HK-DE-Text, '

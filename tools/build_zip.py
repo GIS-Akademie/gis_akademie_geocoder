@@ -171,6 +171,11 @@ def main():
         if os.path.exists(out):
             os.remove(out)
         return 1
+    # Only the current package is kept in dist/ (it is checked in); older ones are removed
+    for old in os.listdir(out_dir):
+        if old.startswith(f'{PACKAGE}_') and old.endswith('.zip') and old != os.path.basename(out):
+            os.remove(os.path.join(out_dir, old))
+            print('Altes Paket entfernt:', old)
     print(f'{out}: {len(files)} Dateien, {size / 1e6:.1f} MB — alle Prüfungen bestanden.')
     return 0
 

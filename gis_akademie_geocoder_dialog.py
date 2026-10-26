@@ -53,23 +53,67 @@ def _fmt_date(iso):
 def _fmt_int(n):
     return f'{n:,}'.replace(',', '.')
 
+
+def _qgis_proxies():
+    """Proxy from the QGIS network settings (Einstellungen → Optionen →
+    Netzwerk) for the plugin's downloads, or None (then the system settings
+    apply)."""
+    try:
+        from qgis.core import QgsNetworkAccessManager
+        from qgis.PyQt.QtNetwork import QNetworkProxy
+        from urllib.parse import quote
+        proxy = QgsNetworkAccessManager.instance().fallbackProxy()
+        types = getattr(QNetworkProxy, 'ProxyType', QNetworkProxy)
+        if proxy.type() not in (types.HttpProxy, types.HttpCachingProxy) or not proxy.hostName():
+            return None
+        auth = (f'{quote(proxy.user(), safe="")}:{quote(proxy.password(), safe="")}@'
+                if proxy.user() else '')
+        url = f'http://{auth}{proxy.hostName()}:{proxy.port() or 8080}'
+        return {'http': url, 'https': url}
+    except Exception:
+        return None
+
+
+def _apply_proxy():
+    _sd.set_proxies(_qgis_proxies())
+
+
+def _keep_until_finished(thread, worker):
+    """A thread that does not stop in time is never terminated (a thread
+    killed inside SQLite leaves the database locked and can hang QGIS). The
+    cancelled worker finishes on its own; until then thread and worker are kept
+    alive in qgis.utils (survives a plugin reload)."""
+    import qgis.utils as _qu
+    keep = getattr(_qu, '_gis_akademie_geocoder_threads', None)
+    if keep is None:
+        keep = _qu._gis_akademie_geocoder_threads = []
+    keep.append((thread, worker))
+
+    def _release(t=thread):
+        for item in list(keep):
+            if item[0] is t:
+                keep.remove(item)
+    thread.finished.connect(_release)
+
 SETTINGS_KEY = 'gis_akademie_geocoder/db_path'
 PLZ_SETTINGS_KEY = 'gis_akademie_geocoder/plz_quelle'   # user-defined postcode (PLZ) file (JSON)
 
 # ────────────────────────────────────────────────────────────────────
-# Field types, version-safe: QGIS 4 / Qt6 removed the QVariant.Type enums
-# (QVariant.String etc.) — QMetaType.Type is expected there.
-# QGIS 3 / Qt5 also knows QMetaType.Type (from 3.38), but falls back to
-# QVariant on very old versions.
-try:
-    from qgis.PyQt.QtCore import QMetaType
-    FT_STRING = QMetaType.Type.QString
-    FT_INT    = QMetaType.Type.Int
-    FT_DOUBLE = QMetaType.Type.Double
-except (ImportError, AttributeError):
-    FT_STRING = QVariant.String
-    FT_INT    = QVariant.Int
-    FT_DOUBLE = QVariant.Double
+# Field types, version-safe: QgsField accepts QMetaType.Type only from QGIS
+# 3.38 on; older QGIS 3 versions need QVariant.Type (PyQt5 knows both enums,
+# so the QGIS version decides, not the import). QGIS 4 / Qt6 removed the
+# QVariant.Type enums.
+def _field_types():
+    if Qgis.QGIS_VERSION_INT >= 33800:
+        try:
+            from qgis.PyQt.QtCore import QMetaType
+            return QMetaType.Type.QString, QMetaType.Type.Int, QMetaType.Type.Double
+        except (ImportError, AttributeError):
+            pass
+    return QVariant.String, QVariant.Int, QVariant.Double
+
+
+FT_STRING, FT_INT, FT_DOUBLE = _field_types()
 
 FORM_CLASS, _ = uic.loadUiType(
     os.path.join(os.path.dirname(__file__), 'gis_akademie_geocoder_dialog.ui')
@@ -191,7 +235,7 @@ class GISAkademieGeocoderDialog(QDialog, FORM_CLASS):
 
         self._imp_worker = None
         self._imp_thread = None
-        self._auto_format = False      # format change caused by file selection (not by the user)
+        self._cancel_requested = False  # geocoding run cancelled by the user
         self._renamed_headers = []     # columns renamed while loading (for the log)
 
         self._combos = {
@@ -203,8 +247,6 @@ class GISAkademieGeocoderDialog(QDialog, FORM_CLASS):
         }
 
         self._connect_signals()
-        self._catalog_cache = None
-        self._last_import_kind = None
         self._last_db_stats = None
         self._build_admin_page()
         # Fill the DB path field with the current path
@@ -212,7 +254,6 @@ class GISAkademieGeocoderDialog(QDialog, FORM_CLASS):
         self.le_db_path.setText(_lc.DB_PATH)
         self._stats_jobs = []          # [(QThread, DbStatsWorker)] — keep references!
         self._stats_generation = 0     # only the most recent result is shown
-        self._last_db_stats = None
         self._refresh_db_status()
         self._refresh_source_views()
 
@@ -222,52 +263,45 @@ class GISAkademieGeocoderDialog(QDialog, FORM_CLASS):
         return [t for t in (self._thread, self._imp_thread)
                 if t is not None and t.isRunning()]
 
-    def shutdown(self, wait_ms=15000):
+    def shutdown(self, wait_ms=5000):
         """Shut down all background threads in a controlled way (closing the
-        dialog, unloading the plugin). Without this, a still running QThread
-        would be destroyed together with the dialog ('QThread: Destroyed while
-        thread is still running') and QGIS would crash. Imports abort via
-        cancel() and roll back the transaction; the database stays unchanged."""
-        for worker, thread in ((self._worker, self._thread),
-                               (self._imp_worker, self._imp_thread)):
+        dialog, unloading the plugin). Workers are cancelled (imports roll back
+        their transaction; the database stays unchanged) and get some time to
+        stop. A thread that is still busy (e.g. a long SQLite statement) is never
+        terminated but kept alive until it ends — terminating it inside SQLite
+        would leave the database locked."""
+        jobs = [(self._thread, self._worker), (self._imp_thread, self._imp_worker)]
+        jobs += list(self._stats_jobs)
+        if self._catalog_job is not None:
+            jobs.append(self._catalog_job)
+        for thread, worker in jobs:
             if worker is not None:
-                try:
-                    worker.cancel()
-                except Exception:
-                    pass
-                # After closing, do not process/write any more results.
-                for sig in ('finished', 'result_ready', 'progress', 'log'):
+                if hasattr(worker, 'cancel'):
+                    try:
+                        worker.cancel()
+                    except Exception:
+                        pass
+                # After closing, do not process/write any more results — but let
+                # the worker still end its thread.
+                for sig in ('finished', 'result_ready', 'progress', 'log', 'detail'):
                     try:
                         getattr(worker, sig).disconnect()
+                    except Exception:
+                        pass
+                if thread is not None:
+                    try:
+                        worker.finished.connect(thread.quit)
                     except Exception:
                         pass
             if thread is not None and thread.isRunning():
                 thread.quit()
                 if not thread.wait(wait_ms):
-                    thread.terminate()
-                    thread.wait(2000)
+                    _keep_until_finished(thread, worker)
         self._worker = self._thread = None
         self._imp_worker = self._imp_thread = None
-        for t, _w in list(self._stats_jobs):
-            try:
-                if t.isRunning():
-                    t.quit()
-                    t.wait(wait_ms)
-            except Exception:
-                pass
         self._stats_jobs = []
-        job = getattr(self, '_catalog_job', None)
-        if job is not None:
-            try:
-                job[1].finished.disconnect()
-                job[0].quit()
-                job[0].wait(wait_ms)
-            except Exception:
-                pass
-            self._catalog_job = None
-        self.btn_run.setEnabled(True)
-        self.btn_stop.setEnabled(False)
-        self._set_import_running(False)
+        self._catalog_job = None
+        self._update_busy_state()
 
     def closeEvent(self, event):
         if self._running_threads():
@@ -371,7 +405,10 @@ class GISAkademieGeocoderDialog(QDialog, FORM_CLASS):
             return
 
         # Give immediate feedback, load statistics in the background — otherwise
-        # the UI freezes with large DBs (millions of addresses).
+        # the UI freezes with large DBs (millions of addresses). Until they are
+        # there, nothing stale is used (e.g. as the state list of a geocoding run).
+        self._last_db_stats = None
+        self._update_address_column()
         self.lbl_db_status.setText(
             '<span style="color:gray;">Lese Statistik … (bei großen Datenbanken kann das einen '
             'Moment dauern)</span>')
@@ -387,7 +424,7 @@ class GISAkademieGeocoderDialog(QDialog, FORM_CLASS):
         # a method of the dialog (QObject) and is therefore executed in the GUI
         # thread — a lambda would run in the background thread.
         self._stats_generation += 1
-        thread = QThread(self)
+        thread = QThread()                 # no parent: may outlive the dialog (see shutdown)
         worker = DbStatsWorker(db_path, self._stats_generation)
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
@@ -508,7 +545,7 @@ class GISAkademieGeocoderDialog(QDialog, FORM_CLASS):
     # renamed on load (e.g. 'name' -> 'name_in'), otherwise QgsFields.append
     # silently fails and the geocoder value overwrites the user's value.
     _RESERVED_OUTPUT_FIELDS = {
-        'fid', 'geocoder_address', 'geocoder_source', 'geocoded', 'name',
+        'fid', 'geom', 'geocoder_address', 'geocoder_source', 'geocoded', 'name',
         'addresstype', 'importance', 'type', 'category', 'accuracy_level',
         'accuracy_label', 'local_score', 'local_score_label', 'lat', 'lon',
     }
@@ -673,39 +710,66 @@ class GISAkademieGeocoderDialog(QDialog, FORM_CLASS):
         self._set_table(rows[0], rows[1:])
         self._after_load(f'{label} — Tabellenblatt: "{sheet}"')
 
-    def _load_text(self, path):
-        ext      = os.path.splitext(path)[1].lower()
-        encoding = 'utf-8-sig'
-        sample   = ''
-        # Check the encoding over the WHOLE file (not just 8 KB — otherwise an
-        # umlaut further down ended up as 'Lesefehler'). cp1252 before latin-1,
-        # because latin-1 never fails and cp1252 would otherwise never be reached.
-        for enc in ('utf-8-sig', 'utf-8', 'cp1252', 'latin-1'):
+    @staticmethod
+    def _text_encoding(path):
+        """Encoding of a text file, checked over the WHOLE file (not just 8 KB —
+        otherwise an umlaut further down ended up as 'Lesefehler'). UTF-16 is
+        recognised by its byte order mark (Excel "Unicode-Text"); cp1252 before
+        latin-1, because latin-1 never fails."""
+        with open(path, 'rb') as f:
+            head = f.read(4)
+        if head[:2] in (b'\xff\xfe', b'\xfe\xff'):
+            return 'utf-16'
+        for enc in ('utf-8-sig', 'cp1252', 'latin-1'):
             try:
                 with open(path, newline='', encoding=enc) as f:
-                    sample   = f.read(8192)
-                    f.read()          # read the rest only to check decoding
-                    encoding = enc
-                break
+                    while f.read(1 << 20):
+                        pass
+                return enc
             except UnicodeDecodeError:
                 continue
+        return 'latin-1'
+
+    @staticmethod
+    def _csv_delimiter(sample):
+        """Delimiter of a CSV file. The header line decides: a header without
+        any delimiter is a single column — then commas inside the values
+        („Hauptstraße 5, 12345 Berlin“) are NOT separators. Otherwise the
+        candidate that occurs in the header and splits the data lines into the
+        same number of fields wins."""
+        lines = [ln for ln in sample.splitlines() if ln.strip()]
+        if not lines:
+            return ';'
+        header, data = lines[0], lines[1:20]
+        cands = [d for d in (';', '\t', '|', ',') if header.count(d)]
+        if not cands:
+            return '\x1f'                       # single column: never split
+        def score(d):
+            n = header.count(d)
+            same = sum(1 for ln in data if ln.count(d) == n)
+            return (same, n)
+        return max(cands, key=score)
+
+    def _load_text(self, path):
+        ext      = os.path.splitext(path)[1].lower()
+        try:
+            encoding = self._text_encoding(path)
+            with open(path, newline='', encoding=encoding) as f:
+                sample = f.read(65536)
+        except OSError as e:
+            QMessageBox.critical(self, 'Fehler', f'Lesefehler:\n{e}')
+            return
         if ext in ('.txt', '.tsv', '.tab'):
             delimiter = '\t'
             filetype  = 'Tab-getrennte Textdatei'
         else:
-            delimiter = ';'
+            delimiter = self._csv_delimiter(sample)
             filetype  = 'CSV'
-            try:
-                import csv as _csv
-                dialect = _csv.Sniffer().sniff(sample, delimiters=',;\t|')
-                if dialect.delimiter:
-                    delimiter = dialect.delimiter
-            except Exception:
-                pass
             _enc_name = {'utf-8-sig': 'UTF-8', 'utf-8': 'UTF-8', 'cp1252': 'Windows-1252',
-                         'latin-1': 'ISO-8859-1'}.get(encoding, encoding)
-            _delim_name = {'	': 'Tabulator', ';': 'Semikolon', ',': 'Komma',
-                           '|': 'senkrechter Strich'}.get(delimiter, f'„{delimiter}“')
+                         'latin-1': 'ISO-8859-1', 'utf-16': 'UTF-16'}.get(encoding, encoding)
+            _delim_name = {'\t': 'Tabulator', ';': 'Semikolon', ',': 'Komma',
+                           '|': 'senkrechter Strich', '\x1f': 'keins (eine Spalte)'}.get(
+                               delimiter, f'„{delimiter}“')
             filetype = f'CSV (Trennzeichen {_delim_name}, Zeichensatz {_enc_name})'
         try:
             with open(path, newline='', encoding=encoding) as f:
@@ -728,11 +792,14 @@ class GISAkademieGeocoderDialog(QDialog, FORM_CLASS):
         self._log(f'Geladen: {len(self._rows)} Zeilen, {len(self._headers)} Spalten  [{filetype_label}]')
         for alt, neu in self._renamed_headers:
             self._log(f'  Spalte „{alt}" → „{neu}" (leer, doppelt oder Name eines Ausgabefelds)')
-        for key, cb in self._combos.items():
+        # First reset ALL combos, then assign — otherwise combos not yet reset
+        # still hold the column indices of the previous file
+        for cb in self._combos.values():
             cb.clear()
             cb.addItem('— nicht zugeordnet —')
             cb.addItems(self._headers)
             cb.setEnabled(True)
+        for key, cb in self._combos.items():
             self._auto_assign(key, cb)
         # Also fill the address column (tab „Eine Spalte")
         self.cb_address.clear()
@@ -843,8 +910,12 @@ class GISAkademieGeocoderDialog(QDialog, FORM_CLASS):
             QMessageBox.warning(self, 'Eingabe fehlt', 'Bitte Layer-Namen angeben.')
             return
 
-        self.btn_run.setEnabled(False)
-        self.btn_stop.setEnabled(True)
+        if self._import_running():
+            QMessageBox.information(self, 'Import läuft',
+                                    'Während Daten in die Datenbank importiert werden, ist sie '
+                                    'gesperrt. Bitte warten, bis die Aktualisierung abgeschlossen ist.')
+            return
+        self._cancel_requested = False
         self.progress_bar.setValue(0)
         self.progress_bar.setMaximum(len(self._rows))
         self._results = []
@@ -871,6 +942,7 @@ class GISAkademieGeocoderDialog(QDialog, FORM_CLASS):
             self._log('🔒 DSGVO-konformes Geocodieren: nur die lokale Datenbank, '
                       'keine Online-Abfrage.')
 
+        _apply_proxy()
         self._thread = QThread()
         self._worker = GeocoderWorker(
             self._rows, col_map, local_only=local_only,
@@ -881,10 +953,12 @@ class GISAkademieGeocoderDialog(QDialog, FORM_CLASS):
         self._worker.result_ready.connect(self._on_results)
         self._worker.finished.connect(self._on_finished)
         self._thread.start()
+        self._update_busy_state(geocoding_running=True)
 
     def _cancel(self):
         if self._worker:
             self._worker.cancel()
+        self._cancel_requested = True
         self._log('Abbruch angefordert …')
         self.btn_stop.setEnabled(False)
 
@@ -899,8 +973,7 @@ class GISAkademieGeocoderDialog(QDialog, FORM_CLASS):
     def _on_finished(self):
         self._thread.quit()
         self._thread.wait()
-        self.btn_run.setEnabled(True)
-        self.btn_stop.setEnabled(False)
+        self._update_busy_state(geocoding_running=False)
         if not self._results:
             self._log('Keine Ergebnisse.')
             return
@@ -936,15 +1009,22 @@ class GISAkademieGeocoderDialog(QDialog, FORM_CLASS):
         gpkg_path  = self.le_gpkg.text().strip()
         layer_name = self.le_layer_name.text().strip()
         split      = self.cb_split_unfound.isChecked()
+        if self._cancel_requested and len(self._results) < len(self._rows):
+            # A cancelled run never overwrites a (complete) layer of the same name
+            layer_name = self._free_layer_name(gpkg_path, f'{layer_name}_teil')
+            ans = QMessageBox.question(
+                self, 'Geocodierung abgebrochen',
+                f'Die Geocodierung wurde nach {len(self._results)} von {len(self._rows)} Adressen '
+                f'abgebrochen.\nTeilergebnis als Layer „{layer_name}“ speichern?',
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.Yes)
+            if ans != QMessageBox.StandardButton.Yes:
+                self._log('Abgebrochen – kein Ergebnis gespeichert.')
+                return
         try:
             if split:
                 found    = [r for r in self._results if r['geocoded']]
                 notfound = [r for r in self._results if not r['geocoded']]
-                if notfound:
-                    csv_path = self._write_unfound_csv(notfound, gpkg_path, layer_name)
-                    self._log(f'{len(notfound)} nicht gefundene Adresse(n) abgelegt: {csv_path}')
-                else:
-                    self._log('Alle Adressen gefunden — keine CSV nötig.')
                 if found:
                     self._save_to_gpkg(found, gpkg_path, layer_name)
                     self._log(f'Gespeichert ({len(found)} Treffer): {gpkg_path}  →  Layer "{layer_name}"')
@@ -952,6 +1032,16 @@ class GISAkademieGeocoderDialog(QDialog, FORM_CLASS):
                         self._load_to_qgis(gpkg_path, layer_name)
                 else:
                     self._log('Keine Treffer — es wurde kein Ergebnis-Layer geschrieben.')
+                if notfound:
+                    # After the layer: a CSV that is open in Excel must not cost the result
+                    try:
+                        csv_path = self._write_unfound_csv(notfound, gpkg_path, layer_name)
+                        self._log(f'{len(notfound)} nicht gefundene Adresse(n) abgelegt: {csv_path}')
+                    except OSError as e:
+                        self._log(f'⚠ Die Liste der nicht gefundenen Adressen konnte nicht geschrieben '
+                                  f'werden (Datei geöffnet?): {e}')
+                else:
+                    self._log('Alle Adressen gefunden — keine CSV nötig.')
             else:
                 self._save_to_gpkg(self._results, gpkg_path, layer_name)
                 self._log(f'Gespeichert: {gpkg_path}  →  Layer "{layer_name}"')
@@ -983,22 +1073,14 @@ class GISAkademieGeocoderDialog(QDialog, FORM_CLASS):
                 w.writerow(row)
         return csv_path
 
-    def _gpkg_layer_names(self, gpkg_path):
-        """Returns the list of layer names in a GeoPackage."""
-        try:
-            from qgis.core import QgsVectorLayer
-            lyr = QgsVectorLayer(gpkg_path, 'tmp', 'ogr')
-            if not lyr.isValid():
-                return []
-            # dataProvider().subLayers() returns "id!!::!!name!!::!!..." entries
-            names = []
-            for sub in lyr.dataProvider().subLayers():
-                parts = sub.split('!!::!!')
-                if len(parts) >= 2:
-                    names.append(parts[1])
-            return names
-        except Exception:
-            return []
+    def _free_layer_name(self, gpkg_path, name):
+        """name, or name_2, name_3 … if the GeoPackage already has such a layer."""
+        existing = {n.lower() for n in self._gpkg_sublayers(gpkg_path)} if os.path.exists(gpkg_path) else set()
+        cand, k = name, 2
+        while cand.lower() in existing:
+            cand = f'{name}_{k}'
+            k += 1
+        return cand
 
     # ──────────────────────────────── GeoPackage ──
 
@@ -1138,13 +1220,12 @@ class GISAkademieGeocoderDialog(QDialog, FORM_CLASS):
 
     # ─────────────────────────── Automatic source download ──
 
-    def _catalog(self, reload=False):
-        if reload or self._catalog_cache is None:
-            try:
-                self._catalog_cache = _sd.load_catalog()
-            except Exception as e:
-                self._catalog_cache = {'sources': {}, '_fehler': [f'Quellenkatalog nicht lesbar: {e}']}
-        return self._catalog_cache
+    @staticmethod
+    def _catalog():
+        try:
+            return _sd.load_catalog()
+        except Exception as e:
+            return {'sources': {}, '_fehler': [f'Quellenkatalog nicht lesbar: {e}']}
 
     def _build_admin_page(self):
         """Tab „Datenbank & Quellen“ (a single page):
@@ -1281,12 +1362,13 @@ class GISAkademieGeocoderDialog(QDialog, FORM_CLASS):
         may hold the write lock)."""
         if self._imp_thread is not None and self._imp_thread.isRunning():
             return
-        cat  = self._catalog(reload=True)
+        cat  = self._catalog()
         meta = all_source_meta()
         self._fill_sources_table(cat, meta)
         self._update_sources_summary(cat)
         self._update_plz_status()
         self._update_plz_source_info()
+        self._update_busy_state()
 
     def _update_sources_summary(self, cat):
         reg     = _sd.registered_bundeslaender(cat)
@@ -1305,8 +1387,6 @@ class GISAkademieGeocoderDialog(QDialog, FORM_CLASS):
             liste = f'Quellenliste: Stand {_fmt_date(cat.get("stand"))} (mit dem Plugin geliefert).'
         txt += f'<br><span style="color:gray;">{liste}</span>'
         self.lbl_auto_info.setText(txt)
-        running = self._imp_thread is not None and self._imp_thread.isRunning()
-        self.btn_auto_update.setEnabled(bool(reg) and not running)
 
     def _update_plz_status(self):
         """One line: do all addresses have a postcode (PLZ), or where are some still missing?"""
@@ -1502,31 +1582,55 @@ class GISAkademieGeocoderDialog(QDialog, FORM_CLASS):
 
     def _open_source_detail(self, bl):
         """Detail page of a Bundesland; afterwards starts the download/import if requested."""
-        cat = self._catalog(reload=True)
+        cat = self._catalog()
         entry = cat['sources'].get(bl) or {}
         try:
             standard = _sd.load_catalog(include_user=False)['sources'].get(bl) or {}
         except Exception:
             standard = {}
-        running = self._imp_thread is not None and self._imp_thread.isRunning()
+        running = self._import_running()
         meta = {} if running else (all_source_meta().get(bl) or {})
         adressen = (self._last_db_stats or {}).get(bl)
+        _apply_proxy()                     # for „Quelle prüfen“
         dlg = SourceEditDialog(self, bl, entry, plugin_version=PLUGIN_VERSION, standard=standard,
-                               meta=meta, adressen=adressen, busy=running)
+                               meta=meta, adressen=adressen, busy=running or self._geocoding_running())
         dlg.exec()
+        action, force = dlg.action, dlg.force
+        dlg.deleteLater()
         self._refresh_source_views()
-        if dlg.action == 'update':
-            self._start_source_update([bl], force=dlg.force)
+        if action == 'update':
+            self._start_source_update([bl], force=force)
 
     def _auto_update_all(self):
         self._start_source_update(None, force=self.cb_auto_force.isChecked())
 
+    def _geocoding_running(self):
+        return self._thread is not None and self._thread.isRunning()
+
+    def _import_running(self):
+        return self._imp_thread is not None and self._imp_thread.isRunning()
+
     def _set_import_running(self, running):
-        for name in ('btn_auto_update', 'btn_catalog'):
+        self._update_busy_state(import_running=running)
+
+    def _update_busy_state(self, import_running=None, geocoding_running=None):
+        """Geocoding and an import exclude each other (an import holds the
+        database's write lock); the database path and the postcode areas cannot
+        be changed while either runs."""
+        imp = self._import_running() if import_running is None else import_running
+        geo = self._geocoding_running() if geocoding_running is None else geocoding_running
+        self.btn_run.setEnabled(not imp and not geo)
+        self.btn_stop.setEnabled(geo and not self._cancel_requested)
+        self.btn_import_stop.setEnabled(imp)
+        for name in ('btn_db_save', 'btn_db_browse', 'btn_plz_own', 'btn_plz_bundled'):
             b = getattr(self, name, None)
             if b is not None:
-                b.setEnabled(not running)
-        self.btn_import_stop.setEnabled(running)
+                b.setEnabled(not imp and not geo)
+        if getattr(self, 'btn_auto_update', None) is not None:
+            self.btn_auto_update.setEnabled(not imp and not geo)
+            self.btn_catalog.setEnabled(not imp and self._catalog_job is None)
+        if not imp and not geo and getattr(self, 'btn_plz_bundled', None) is not None:
+            self._update_plz_source_info()
 
     def _check_catalog(self):
         """„Quellenliste prüfen“ (check source list): load the online list in the background."""
@@ -1534,7 +1638,8 @@ class GISAkademieGeocoderDialog(QDialog, FORM_CLASS):
             return
         self.btn_catalog.setEnabled(False)
         self.btn_catalog.setText('Prüfe …')
-        thread = QThread(self)
+        _apply_proxy()
+        thread = QThread()                 # no parent: may outlive the dialog (see shutdown)
         worker = CatalogCheckWorker()
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
@@ -1548,12 +1653,9 @@ class GISAkademieGeocoderDialog(QDialog, FORM_CLASS):
         if job is not None:
             job[0].wait(2000)
         self.btn_catalog.setText('Quellenliste prüfen')
-        self.btn_catalog.setEnabled(not (self._imp_thread is not None and self._imp_thread.isRunning()))
         self._tech_log(f'Quellenliste: {status} – {text}')
         self._refresh_source_views()
-        if status == 'neu':
-            QMessageBox.information(self, 'Quellenliste', text)
-        elif status in ('zu_neu', 'fehler'):
+        if status in ('zu_neu', 'fehler'):
             QMessageBox.warning(self, 'Quellenliste', text)
         else:
             QMessageBox.information(self, 'Quellenliste', text)
@@ -1561,9 +1663,14 @@ class GISAkademieGeocoderDialog(QDialog, FORM_CLASS):
     def _start_source_update(self, bundeslaender, force=False):
         """Download + import for the given Bundesländer (None = all with a
         registered source) in the background; progress at the bottom of the page."""
-        if self._imp_thread is not None and self._imp_thread.isRunning():
+        if self._import_running():
             return
-        cat = self._catalog(reload=True)
+        if self._geocoding_running():
+            QMessageBox.information(self, 'Geocodierung läuft',
+                                    'Bitte warten, bis die Geocodierung abgeschlossen ist – während '
+                                    'eines Imports ist die Datenbank gesperrt.')
+            return
+        cat = self._catalog()
         targets = bundeslaender or _sd.registered_bundeslaender(cat)
         if not targets:
             QMessageBox.information(self, 'Keine Quelle eingetragen',
@@ -1571,7 +1678,7 @@ class GISAkademieGeocoderDialog(QDialog, FORM_CLASS):
             return
         self.tab_widget.setCurrentWidget(self.tab_admin)
         self.admin_scroll.ensureWidgetVisible(self.grp_import_progress)
-        self._last_import_kind = 'auto'
+        _apply_proxy()
         self._set_import_running(True)
         self.import_log.clear()
         self.import_progress_bar.setMaximum(0)
@@ -1596,8 +1703,7 @@ class GISAkademieGeocoderDialog(QDialog, FORM_CLASS):
         self._imp_thread.started.connect(self._imp_worker.run)
         self._imp_worker.progress.connect(self._on_import_progress)
         self._imp_worker.log.connect(self._import_log)
-        if hasattr(self._imp_worker, 'detail'):
-            self._imp_worker.detail.connect(self._tech_log)
+        self._imp_worker.detail.connect(self._tech_log)
         self._imp_worker.finished.connect(self._on_import_finished)
         self._imp_thread.start()
 
@@ -1643,10 +1749,7 @@ class GISAkademieGeocoderDialog(QDialog, FORM_CLASS):
         self.btn_import_stop.setEnabled(False)
 
     def _on_import_progress(self, current, total, status):
-        # Download progress comes in bytes — QProgressBar is 32-bit.
-        while total > 2_000_000_000:
-            current //= 1024
-            total   //= 1024
+        # (the worker scales byte counts below 2^31 — QProgressBar is 32-bit)
         if total > 0:
             self.import_progress_bar.setMaximum(total)
             # Clamp the value to the maximum (the GML estimate can be too low)
@@ -1687,13 +1790,12 @@ class GISAkademieGeocoderDialog(QDialog, FORM_CLASS):
             pass
         self._imp_worker = None
 
-        if self._last_import_kind == 'auto':
-            if success:
-                QMessageBox.information(self, 'Quellen aktualisiert', message)
-            else:
-                QMessageBox.warning(self, 'Quellen-Aktualisierung', message)
-        elif success:
-            QMessageBox.information(self, 'Import abgeschlossen', message)
+        if success:
+            QMessageBox.information(self, 'Quellen aktualisiert', message)
+        elif aborted:
+            QMessageBox.information(self, 'Quellen-Aktualisierung', message)
+        else:
+            QMessageBox.warning(self, 'Quellen-Aktualisierung', message)
 
     def _tech_log(self, msg):
         """Technical details to the QGIS message log (for support)."""

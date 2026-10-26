@@ -66,8 +66,7 @@ _FORMAT_LABELS = {'hkde': 'HK-DE-Textformat (.txt/.csv)',
                   'alkis': 'ALKIS-GeoPackage (Gebäude und Flurstücke)',
                   'geojson': 'GeoJSON (OGC API Features)'}
 
-_DEFAULT_ENTPACKEN = {'hkde': r'\.(txt|csv)$', 'gml': r'\.(gml|xml)$',
-                      'shp': r'\.(shp|shx|dbf|prj|cpg)$'}
+_DEFAULT_ENTPACKEN = _sd._FILE_MUSTER      # same default patterns as for a file source
 
 # Shapefile fields: key, label, required, name patterns for the preselection
 _SHP_FIELDS = [
@@ -139,7 +138,10 @@ class _SourceTestWorker(QObject):
         self.entry, self.version = entry, version
 
     def run(self):
-        ok, text = _sd.test_source(self.entry, user_agent_version=self.version)
+        try:
+            ok, text = _sd.test_source(self.entry, user_agent_version=self.version)
+        except Exception as e:          # done must always arrive (the dialog waits for it)
+            ok, text = False, f'{type(e).__name__}: {e}'
         self.done.emit(ok, text)
 
 
@@ -517,17 +519,10 @@ class SourceEditDialog(QDialog):
         return self.cb_typ.currentData()
 
     def _fill_formats(self, current=None):
-        """Format list per source type: shapefile only as a file."""
+        """Format list per source type (source_downloader.TYPE_FORMATS)."""
         current = current or self.cb_format.currentData()
-        t = self._typ()
-        if t == 'wfs':
-            keys = ['hkde', 'gml', 'osm']
-        elif t == 'index_geojson':
-            keys = ['alkis']
-        elif t == 'ogcapi':
-            keys = ['geojson']
-        else:
-            keys = ['hkde', 'gml', 'shp', 'osm']
+        # Only the formats the import can take from this source type
+        keys = [k for k in _sd.TYPE_FORMATS.get(self._typ(), ()) if k in _FORMAT_LABELS]
         self.cb_format.blockSignals(True)
         self.cb_format.clear()
         for k in keys:
@@ -772,13 +767,25 @@ class SourceEditDialog(QDialog):
                                  f"EPSG:{info.get('epsg')}): " + ' · '.join(rows))
 
     # ── Entry ──────────────────────────────────────────────────────────────
+    # Catalog fields edited on this page; all others of the original entry
+    # (e.g. ausweich, bbox, crs, dauer, vermerk) are kept unchanged.
+    _FORM_KEYS = {'typ', 'format', 'quelle_name', 'lizenz', 'hinweis', 'felder', 'pfad', 'url',
+                  'datei_muster', 'link_muster', 'ressource_muster', 'abfrage', 'url_feld',
+                  'objekt', 'seitengroesse', 'typnamen', 'abruf', 'max_objekte', 'kachel_crs',
+                  'kachel_bbox', 'gemeinde_ebene', 'entpacken', 'min_abstand_tage'}
+
     def entry(self):
-        """Catalog entry from the form fields."""
+        """Catalog entry from the form fields — plus the fields of the original
+        entry that this page does not show (if the source type is unchanged)."""
         t = self._typ()
-        e = {'typ': t, 'format': self.cb_format.currentData(),
-             'quelle_name': self.le_name.text().strip() or f'Eigene Quelle {self.bundesland}',
-             'lizenz': self.le_lizenz.text().strip(),
-             'hinweis': self.le_hinweis.text().strip()}
+        orig = self._orig_entry or {}
+        same_typ = orig.get('typ') == t
+        e = {k: v for k, v in orig.items()
+             if same_typ and k not in self._FORM_KEYS and not str(k).startswith('_')}
+        e.update({'typ': t, 'format': self.cb_format.currentData(),
+                  'quelle_name': self.le_name.text().strip() or f'Eigene Quelle {self.bundesland}',
+                  'lizenz': self.le_lizenz.text().strip(),
+                  'hinweis': self.le_hinweis.text().strip()})
         if e['format'] == 'shp' or t == 'ogcapi':
             e['felder'] = self._current_felder() or dict(self._saved_felder)
         if t == 'datei':
@@ -805,9 +812,12 @@ class SourceEditDialog(QDialog):
                 e['abruf'] = 'kacheln'
                 e['max_objekte'] = self.sp_seite.value()
                 e['kachel_crs'] = self.cb_kachel_crs.currentData()
-                # generous: covers Germany in UTM 32 and 33; empty tiles
-                # only cost a hit-count query
-                e['kachel_bbox'] = [-500000, 5000000, 1500000, 6500000]
+                # The tile frame of the original entry stays (it belongs to its
+                # coordinate system); otherwise a generous frame covering Germany
+                # in UTM 32 and 33 — empty tiles only cost a hit-count query.
+                e['kachel_bbox'] = (orig.get('kachel_bbox')
+                                    if same_typ and orig.get('kachel_crs') == e['kachel_crs']
+                                    and orig.get('kachel_bbox') else [-500000, 5000000, 1500000, 6500000])
             else:
                 e['seitengroesse'] = self.sp_seite.value()
             if self.cb_ebene.currentData():

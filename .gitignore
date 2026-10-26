@@ -16,10 +16,10 @@ htmlcov/
 .venv/
 venv/
 
-# Plugin-Pakete / Build-Artefakte
+# Plugin-Pakete / Build-Artefakte (das fertige Paket unter dist/ wird mit eingecheckt)
 *.zip
+!dist/*.zip
 build/
-dist/
 
 # IDE / OS
 .idea/

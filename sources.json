@@ -38,7 +38,7 @@
       "turnus": "laufend",
       "hinweis": "Rund 4,5 Mio. Adressen, ohne Postleitzahlen – sie werden automatisch aus den mitgelieferten PLZ-Gebieten ergänzt.",
       "liefert_plz": false,
-      "dauer": "einige Minuten",
+      "dauer": "rund 5 Minuten",
       "technik": "index.json von opengeodata.nrw.de; Datei gebref_EPSG25832_ASCII.zip (~97 MB), HK-DE 20-spaltig.",
       "vermerk": "© Geobasis NRW, dl-de/by-2-0"
     },
@@ -300,7 +300,7 @@
       "lizenz": "ODbL 1.0 (© OpenStreetMap-Mitwirkende)",
       "turnus": "täglich",
       "min_abstand_tage": 28,
-      "dauer": "rund 10 Minuten",
+      "dauer": "rund 15 Minuten",
       "liefert_plz": true,
       "hinweis": "Nicht amtlich: rund 2,5 Mio. Adressen aus OpenStreetMap (© OpenStreetMap-Mitwirkende, ODbL). Amtliche Hauskoordinaten gibt es in Bayern nur kostenpflichtig. Beim Aktualisieren übersprungen, solange der letzte Abruf weniger als 28 Tage zurückliegt.",
       "technik": "Geofabrik-Extrakt bayern-latest.osm.pbf (rund 860 MB, Weiterleitung auf die Tagesfassung), Umwandlung mit dem GDAL-OSM-Treiber (osm_convert.py) ins HK-BY-Format; Gemeinde aus addr:city, sonst aus admin_level 8/7/6.",

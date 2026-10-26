@@ -1,16 +1,53 @@
 # GIS-Akademie Geocoder (QGIS-Plugin)
 
 *English:* QGIS plugin that geocodes German address tables (CSV, Excel, OpenDocument, tab-separated) against a local
-SQLite database of official house coordinates for all 16 German states, with Nominatim as an optional
+database of official house coordinates for all 16 German states, with Nominatim as an optional
 fallback. It can work fully offline (GDPR mode). The plugin downloads and updates the states' open data
 itself, converts an OpenStreetMap extract for Bavaria and adds missing postcodes from bundled postcode
 areas derived from OpenStreetMap. User interface and documentation are in German. Install it from the
 QGIS plugin manager; report problems in the [issue tracker](https://github.com/GIS-Akademie/gis_akademie_geocoder/issues).
 
-Geocodiert Adressen aus CSV-, Excel-, OpenDocument- oder Tab-Dateien gegen eine lokale SQLite-Datenbank
-amtlicher Hauskoordinaten (alle 16 Bundesländer) mit Nominatim als optionalem Fallback.
-Ergebnis ist ein GeoPackage-Layer in QGIS. Details, Datenquellen und Lizenzen: `help.html`
-(im Plugin über „Hilfe“).
+Das Plugin ordnet Adressen aus Tabellendateien Koordinaten zu und legt das Ergebnis als Punkt-Layer in
+einem GeoPackage ab. Grundlage ist eine lokale Datenbank amtlicher Hauskoordinaten aller
+16 Bundesländer, die das Plugin selbst aus den offenen Daten der Länder aufbaut.
+
+## Funktionen
+
+- **Eingabe:** CSV, Excel (.xlsx/.xls), OpenDocument-Tabellen (.ods) und Tab-getrennte Textdateien.
+  Die Spalten (Straße, Hausnummer, PLZ, Ort …) werden zugeordnet; auch eine einzelne Spalte mit der
+  ganzen Adresse ist möglich.
+- **Lokale Suche:** fehlertolerant bei Tippfehlern, Abkürzungen („Str.“) und ß/ss; Ortsteile und
+  Bezirke werden erkannt.
+- **Nominatim (OpenStreetMap)** optional als Ausweichsuche für Adressen ohne lokalen Treffer.
+- **DSGVO-Modus:** nur die lokale Datenbank, keine Adresse verlässt den Rechner.
+- **Ergebnis:** GeoPackage-Layer mit Genauigkeitsstufe und Übereinstimmungswert je Adresse; nicht
+  gefundene Adressen wahlweise als eigene CSV-Datei.
+- **Datenbank im Plugin:** Ein Klick lädt die offenen Daten aller Länder und aktualisiert später nur,
+  was neu ist. Ändert ein Land seinen Download, kommt die neue Adresse über eine online gepflegte
+  Quellenliste – ohne neue Plugin-Version.
+- **Postleitzahlen:** Fehlende PLZ werden aus mitgelieferten PLZ-Gebieten (OpenStreetMap) ergänzt.
+
+## Installation
+
+In QGIS über *Erweiterungen → Erweiterungen verwalten und installieren* nach „GIS-Akademie Geocoder“
+suchen und installieren. Weitere Pakete sind nicht nötig; nur für das alte Excel-Format .xls wird das
+Python-Paket `xlrd` gebraucht.
+
+## Erste Schritte
+
+1. **Datenbank einrichten (einmalig):** Reiter „Datenbank & Quellen“ öffnen und *Alle eingetragenen
+   Quellen aktualisieren* klicken. Für alle 16 Länder dauert das beim ersten Mal rund 2,5–3 Stunden
+   (rund 11 GB Download, fertige Datenbank 5–6 GB). Wer nur Adressen aus wenigen Ländern hat, lädt
+   nur diese.
+2. **Geocodieren:** Im Reiter „Geocodierung“ die Datei wählen, die Spaltenzuordnung prüfen, Ziel und
+   Layer-Name angeben und *Geocodierung starten* klicken.
+3. **Ergebnis prüfen:** Die Felder `accuracy_level` (Genauigkeit) und `local_score` (Übereinstimmung)
+   zeigen, wie gut jeder Treffer ist.
+
+Die ausführliche Anleitung mit Aufwand je Bundesland, Quellen und Fehlerbehebung öffnet sich im Plugin
+über *Hilfe*. Eine fertige, monatlich aktualisierte Datenbank bietet die GIS-Akademie als
+[Geodatenabo Plus](https://www.gis-akademie.de/gis/geodatenabo.html) an; das Plugin funktioniert
+auch ohne Abo vollständig.
 
 ## Änderungsprotokoll
 
@@ -18,123 +55,16 @@ Ergebnis ist ein GeoPackage-Layer in QGIS. Details, Datenquellen und Lizenzen: `
 - **1.0** – Erste Veröffentlichung im QGIS-Plugin-Verzeichnis. Geocodiert Adresstabellen (CSV, Excel, OpenDocument, Tab-getrennt) gegen eine lokale Datenbank amtlicher Hauskoordinaten aller 16 Bundesländer, optional mit Nominatim als Ausweichsuche oder vollständig offline (DSGVO-Modus). Die Datenbank wird im Plugin eingerichtet und aktualisiert: Ein Klick lädt die offenen Daten der Länder und importiert nur, was sich geändert hat; die Quellenliste lässt sich online aktualisieren. Fehlende Postleitzahlen werden aus den mitgelieferten PLZ-Gebieten (OpenStreetMap) ergänzt.
 <!-- /AENDERUNGEN -->
 
-## Aufbau
+## Lizenzen
 
-| Datei | Zweck |
-|---|---|
-| `local_geocoder.py` | Lokale Suche (SQLite, Levenshtein), Normalisierung, Bundesland-Erkennung, Gemeinde-/Ortsteil-Verzeichnis, Quellen-Metadaten. **QGIS-frei**, daher direkt testbar. |
-| `geocoder_worker.py` | Hintergrund-Worker: lokale Suche → Nominatim-Fallback, Genauigkeitsstufen. |
-| `gis_akademie_geocoder_dialog.py` / `.ui` | Dialog: Datei laden, Spaltenzuordnung, GeoPackage-Ausgabe, Admin-/Import-Tab. |
-| `db_import_worker.py`, `gml_import_worker.py`, `shp_import_worker.py` | Import von HK-DE-Text, INSPIRE-GML (Datei oder WFS-Seiten) und Shapefiles in die Datenbank (je eine Transaktion). |
-| `sources.json`, `source_downloader.py`, `source_update_worker.py`, `source_editor_dialog.py` | Quellenkatalog, Abruf (einzeln oder alle, nur bei neuen Daten), Import, Stand-Verwaltung (`source_meta`) und Detailseite je Bundesland für eigene Quellen (`sources_user.json` im QGIS-Profil). |
-| `osm_convert.py` | OpenStreetMap-Extrakt (.osm.pbf) per GDAL-OSM-Treiber in eine HK-BY-Datei umwandeln (Bayern; Format `osm` im Katalog). |
-| `plz_resolver.py`, `data/plz_gebiete.*` | Mitgelieferte PLZ-Gebiete (direkt aus OpenStreetMap, ODbL) und automatische PLZ-Ergänzung per Punkt-in-Fläche: beim Import und im Nachlauf `ergaenze_plz()`; mit QGIS oder in reinem Python. |
-| `tools/build_db.py` | Baut die Datenbank ohne QGIS aus allen automatisch abrufbaren Quellen. |
-| `tools/build_plz_gebiete.py` | Erzeugt `data/plz_gebiete.geojson` neu aus den OSM-Relationen `boundary=postal_code` des Geofabrik-Deutschland-Extrakts (mit der Python-Umgebung von QGIS starten, braucht GDAL). |
-| `tools/` (weitere) | Diagnose- und Migrationsskripte für bestehende Datenbanken, Qt-Stub. |
-| `tests/` | pytest-Suite (läuft ohne QGIS). |
-
-Die Geocodierungsdatenbank liegt **nicht** im Repository (siehe `.gitignore`). Standardpfad ist
-`<QGIS-Profil>/gis_akademie_geocoder/geocoder.db`; ein anderer Pfad wird im Reiter „Datenbank & Quellen“ gesetzt.
-Automatisch geladene Quelldateien landen im Ordner `quellen/` neben der Datenbank.
-
-## Automatischer Quellen-Download
-
-`sources.json` beschreibt je Bundesland, wie die Hauskoordinaten bezogen werden:
-
-| Typ | Bedeutung | Beispiel |
-|---|---|---|
-| `direct` | feste Datei-URL, optional mit Platzhaltern `{datum}` (JJJJMMTT), `{jahr}`, `{nr}` (Datenfassung), die beim Abruf aufgelöst werden | Hessen, Bremen, Bayern |
-| `index_json` | Verzeichnisindex von opengeodata.nrw.de | Nordrhein-Westfalen |
-| `atom` / `rss` / `page_link` | Datei-Link per Regex aus Feed oder HTML-Seite | Berlin, Sachsen |
-| `ckan` | CKAN-API `package_search`, jüngste passende Ressource | – (für eigene Quellen) |
-| `wfs` | WFS 2.0 GetFeature mit Paging, Import der GML-Seiten | Mecklenburg-Vorpommern, Hamburg |
-| `datei` | eingetragene Datei auf diesem Rechner (`pfad`; HK-DE, GML, Shapefile mit `felder` oder Zip); erneuter Import, wenn Größe/Änderungszeit sich ändern | nur eigene Quellen |
-| `index_geojson` | GeoJSON-Index mit einer Datei je Feature (Feld `url_feld`); jede Datei wird geladen, umgewandelt und gelöscht | Niedersachsen (Format `alkis`) |
-| `gaialight` | GaiaLight-Downloaddienst: neuesten Bestand ermitteln, Auftrag starten, warten, laden (`objekt`) | Schleswig-Holstein |
-| `ogcapi` | OGC API Features, GeoJSON-Seiten mit Feldzuordnung `felder` | Saarland |
-| `manuell` | kein automatischer Abruf (Shop, Registrierung, Bot-Schutz, Aufbereitung) – mit Begründung | Hessen, RLP, Thüringen … |
-
-Meldungen: Die Worker haben zwei Kanäle – `log` für das Protokollfenster (Texte für Endkunden)
-und `detail` für technische Angaben, die der Dialog ins QGIS-Meldungsprotokoll (Reiter
-„GIS-Akademie Geocoder“) schreibt. `SourceError` trägt eine kundentaugliche Meldung und
-optional `detail`. Im Katalog sind `hinweis`/`grund` für Endkunden, `technik` wird nie angezeigt.
-Der Test `test_user_log_has_no_technical_terms` sichert die Trennung ab.
-
-Es werden nur offen lizenzierte Quellen mit unmittelbarem Zugriff abgerufen (sprechender
-User-Agent mit Kontaktadresse). Der letzte Stand (ETag/Last-Modified, Prüfsumme, Datum,
-Adresszahl) steht in der Tabelle `source_meta`; ein erneuter Abruf fragt bedingt an.
-
-Eine neue Quelle braucht nur einen Katalogeintrag (Typ, URL, Regex, Format). Optional: `ausweich` (Ausweichquelle,
-wenn die Hauptquelle scheitert; mit `"nur_ohne_bestand": true` nur, solange das Land noch keine
-Adressen hat) und `vermerk` (Quellenvermerk). Nach jeder Änderung an `sources.json`
-`python tools/build_help_tables.py` ausführen — es erzeugt die Quellentabellen der Hilfe; `build_zip.py`
-prüft, dass sie aktuell sind. Für INSPIRE-GML
-aus einem WFS gibt `gemeinde_ebene` an, welche INSPIRE-Verwaltungsebene als Gemeinde gilt;
-`min_abstand_tage` ist eine Sperre nach dem Abruf (kein Zeitplan): beim Aktualisieren wird die
-Quelle übersprungen (Status `skipped`), solange der letzte Abruf jünger ist — für Quellen ohne ETag
-(WFS) oder mit täglich neuem Stand (OSM); `liefert_plz` steuert den PLZ-Hinweis.
-
-**Quellenliste online pflegen:** Das Plugin lädt `sources.json` von `katalog_url` (Standard:
-`main`-Zweig dieses Repositorys über raw.githubusercontent.com — das Repository muss dafür öffentlich
-sein) und verwendet sie, wenn ihr `stand` neuer ist als der mitgelieferte. Für eine Link-Korrektur
-also nur `sources.json` ändern, **`stand` auf das heutige Datum setzen** und auf `main` pushen — keine
-neue Plugin-Version nötig. Neue Abruf-Typen oder Formate brauchen dagegen eine neue Plugin-Version;
-ältere Plugins übergehen solche Einträge. `version` (Format der Liste) nur erhöhen, wenn alte Plugins
-die Liste gar nicht mehr lesen sollen.
-
-Nutzer können im Reiter „Datenbank & Quellen“ über die Detailseite eines Bundeslands eigene
-Quellen eintragen – eine Internetquelle oder eine Datei (`typ: datei`). Sie werden in
-`<QGIS-Profil>/gis_akademie_geocoder/sources_user.json` gespeichert und ersetzen den
-Standardeintrag des Bundeslands (`source_downloader.load_catalog` führt beide zusammen).
-
-## Datenbank ohne QGIS bauen
-
-```bash
-python tools/build_db.py --list
-python tools/build_db.py C:/Daten/geocoder.db
-python tools/build_db.py C:/Daten/geocoder.db --bundesland Berlin Sachsen --force
-```
-
-Fehlende PLZ werden auch dort aus den mitgelieferten PLZ-Gebieten ergänzt (reiner Python-Rechenweg,
-rund 30.000 Adressen je Sekunde).
-
-## Tests
-
-Die Suite braucht nur Python 3 und pytest, kein QGIS (`qgis.PyQt.QtCore` wird durch einen Stub
-aus `tools/_qt_stub.py` ersetzt). Sie baut eine Mini-Datenbank mit gleichnamigen Orten,
-Ortsteilen und Hausnummern-Zusätzen auf und prüft Normalisierung, Bundesland-Erkennung,
-Suche, Straßen-Repräsentant, Diagnose, Worker, Quellenkatalog, Download (mit Fake-HTTP),
-WFS-Paging und GML-Import.
-
-```bash
-python -m pytest tests -q
-```
-
-## Deploy
-
-Vor jeder Auslieferung die Version in `metadata.txt` erhöhen (QGIS ersetzt ein Plugin gleicher
-Version nicht zuverlässig) und den Changelog in `metadata.txt` ergänzen; `python tools/build_help_tables.py`
-überträgt ihn in die Hilfe und in diese README. Zum Verpacken den Plugin-Ordner **ohne**
-`material/`, `tests/`, `tools/`, `__pycache__/` zippen (`sources.json` muss enthalten sein).
-
-## Lizenz
-
-- **Code:** GNU General Public License, Version 2 oder später (GPL-2.0-or-later), siehe `LICENSE`.
-- **Mitgelieferte PLZ-Gebiete** (`data/plz_gebiete.geojson`): © OpenStreetMap-Mitwirkende,
-  Open Database License (ODbL) 1.0.
+- **Plugin:** GNU General Public License, Version 2 oder später (GPL-2.0-or-later), siehe `LICENSE`.
+- **Mitgelieferte PLZ-Gebiete:** © OpenStreetMap-Mitwirkende, Open Database License (ODbL) 1.0.
 - **Geladene Adressdaten:** Lizenz der jeweiligen Quelle (meist dl-de/by-2-0, Berlin dl-de/zero-2-0,
-  Bremen CC BY 4.0, Bayern/OpenStreetMap ODbL) — Namensnennung siehe Hilfe (`help.html`).
+  Bremen und weitere CC BY 4.0, Bayern/OpenStreetMap ODbL). Die Quellenvermerke je Bundesland stehen
+  in der Hilfe und sind bei Weitergabe von Ergebnissen anzugeben.
 
-## Veröffentlichung im QGIS-Plugin-Verzeichnis
+## Fehler melden
 
-```
-python tools/build_zip.py          # Paket bauen und nach den Regeln von plugins.qgis.org prüfen
-python tools/build_zip.py --urls   # zusätzlich repository/tracker/homepage abrufen
-```
-
-Voraussetzungen für den Upload: das Repository ist **öffentlich** (das Verzeichnis ruft repository,
-tracker und homepage beim Hochladen ab), Issues sind aktiviert, die Version in `metadata.txt` ist
-erhöht. Die Sicherheitsprüfung des Verzeichnisses (Bandit, detect-secrets) ergab für 1.0 keine
-kritischen Befunde.
-
+Fehler und Wünsche bitte im [Issue-Tracker](https://github.com/GIS-Akademie/gis_akademie_geocoder/issues)
+melden. Technische Angaben zu einem Fehler stehen in QGIS unter *Ansicht → Bedienfelder →
+Protokollmeldungen*, Reiter „GIS-Akademie Geocoder“.

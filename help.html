@@ -135,8 +135,7 @@
     <p>Soll die Datenbank woanders liegen (z.&nbsp;B. auf einem Laufwerk mit mehr Platz), tragen Sie den
     Pfad unter <em>Pfad zur Datenbankdatei</em> ein und klicken <em>Pfad speichern und Datenbank
     verwenden</em>. Gibt es die Datei noch nicht, meldet das Plugin „Pfad gespeichert. Datei wird beim
-    ersten Import angelegt.“ Eine Datenbank am früheren Ort im Plugin-Ordner wird automatisch
-    weiterverwendet.</p>
+    ersten Import angelegt.“</p>
 
     <h3>Schritt 2: Daten laden</h3>
     <ul>
@@ -349,12 +348,9 @@
     </table>
     <p>Im DSGVO-Modus entfallen beide Nominatim-Zeilen.</p>
     <h3>Bundesland-Erkennung über die PLZ</h3>
-    <p>Fehlt ein Bundesland-Feld (oder steht dort nur „Deutschland“), erkennt der Geocoder das Bundesland
-    an den ersten beiden Ziffern der PLZ. Bereiche, die mehrere Länder betreffen (z.&nbsp;B. 14xxx Berlin/
-    Brandenburg, 76xxx Baden-Württemberg/Rheinland-Pfalz), werden bewusst nicht zugeordnet; dann
-    entscheiden Ort und PLZ. Bremen wird nur über das Bundesland-Feld bzw. den Ort erkannt, weil 28xxx
-    auch das niedersächsische Umland umfasst. Die vollständige Liste steht im Anhang
-    (<a href="#plz_praefixe">PLZ-Präfixe</a>).</p>
+    <p>Fehlt ein Bundesland-Feld (oder steht dort nur „Deutschland“), schätzt der Geocoder das Bundesland
+    aus den ersten Ziffern der PLZ. Es dient nur als Vorfilter, damit die Suche schneller ist; den
+    Ausschlag geben Ort und PLZ.</p>
     <div class="tip">Eine vollständige 5-stellige PLZ ist bundesweit eindeutig. Die lokale Suche findet die
     Adresse darüber auch dann, wenn der Ort fehlt oder das aus der PLZ geratene Bundesland falsch wäre
     (z.&nbsp;B. 21244 Buchholz, deren Präfix 21 sonst Hamburg zugeordnet ist).</div>
@@ -448,10 +444,6 @@
     <p>Wer nur aktualisiert und nichts ändert, behält die Standardquelle. Geänderte Angaben werden als
     <b>eigene Quelle</b> im QGIS-Profil gespeichert, ersetzen die Standardquelle des Landes und überstehen
     Plugin-Updates.</p>
-    <div class="tip"><b>Tipp für Portale mit JavaScript-Seiten:</b> Versteckt ein Portal den Download
-    hinter einer JavaScript-Seite, hat die Datei aber eine feste Adresse (im Browser unter
-    Entwicklerwerkzeuge → Netzwerk ablesbar), genügt Bezugsart <em>Feste Datei-URL</em> — dann wird das
-    Land wie die übrigen Internetquellen automatisch aktualisiert.</div>
     <div class="tip">Bitte nur offen lizenzierte Quellen mit unmittelbarem Zugriff eintragen (z.&nbsp;B.
     dl-de/by-2-0, dl-de/zero-2-0, CC BY 4.0) — keine Shops, Anmeldungen oder Portale mit Bot-Schutz — und
     die Namensnennung laut Lizenz im Ergebnis bzw. in der Kartenquelle angeben.</div>
@@ -488,8 +480,7 @@
       <li><b>Eigene Quellen haben immer Vorrang</b> und werden nie überschrieben.</li>
       <li>Die Liste enthält nur Daten, kein Programm. Einträge, die das Plugin nicht kennt (z.&nbsp;B. ein
         neuer Abruf-Typ für eine spätere Version), werden übergangen — für dieses Land gilt dann die
-        mitgelieferte Quelle. Eine Online-Liste darf nur auf Internetadressen verweisen, nie auf Dateien
-        dieses Rechners.</li>
+        mitgelieferte Quelle.</li>
       <li>Abgerufen wird nur auf Klick, nie beim Start von QGIS. GitHub sieht dabei wie bei jedem Download
         die IP-Adresse des Rechners; Adressdaten werden nicht übertragen.</li>
     </ul>
@@ -791,35 +782,12 @@
     <h3>Koordinaten</h3>
     <p>Die amtlichen Hauskoordinaten liegen je nach Land in UTM Zone 32N (EPSG:25832) oder 33N
     (EPSG:25833). Das Plugin erkennt die Zone und rechnet die Ergebnisse nach WGS84 (EPSG:4326) um.</p>
-    <h3 id="plz_praefixe">Bundesland-Erkennung: PLZ-Präfixe</h3>
-    <table>
-      <tr><th>Bundesland</th><th>PLZ-Präfixe</th></tr>
-      <tr><td>Nordrhein-Westfalen</td><td><code>32 33 40–42 44–49 50–53 57–59</code> (34xxx → Hessen; 37xxx bewusst nicht zugeordnet, mehrdeutig mit Niedersachsen/Hessen)</td></tr>
-      <tr><td>Hamburg</td><td><code>20 21 22</code></td></tr>
-      <tr><td>Hessen</td><td><code>34 35 36 60 61 63 64 65</code></td></tr>
-      <tr><td>Berlin</td><td><code>10 12 13 14</code></td></tr>
-      <tr><td>Sachsen</td><td><code>01 02 04 08 09</code></td></tr>
-      <tr><td>Brandenburg</td><td><code>03 15 16</code> (14xxx bewusst nicht zugeordnet, da mehrdeutig mit Berlin)</td></tr>
-      <tr><td>Sachsen-Anhalt</td><td><code>06 39</code></td></tr>
-      <tr><td>Thüringen</td><td><code>07 98 99</code> (36xxx/37xxx bewusst nicht zugeordnet, mehrdeutig mit Hessen/NRW)</td></tr>
-      <tr><td>Rheinland-Pfalz</td><td><code>54 55 56 67</code> (65xxx/76xxx bewusst nicht zugeordnet, mehrdeutig mit Hessen/BW)</td></tr>
-      <tr><td>Baden-Württemberg</td><td><code>68 69 70–75 77–79 88 89</code> (76xxx bewusst nicht zugeordnet, mehrdeutig mit RP)</td></tr>
-      <tr><td>Saarland</td><td><code>66</code></td></tr>
-      <tr><td>Schleswig-Holstein</td><td><code>23 24 25</code> (22xxx bewusst nicht zugeordnet, mehrdeutig mit Hamburg)</td></tr>
-      <tr><td>Mecklenburg-Vorpommern</td><td><code>17 18 19</code></td></tr>
-      <tr><td>Niedersachsen</td><td><code>26 29 30 31 38</code> (21xxx/27xxx/37xxx/49xxx bewusst nicht zugeordnet, mehrdeutig mit Hamburg/Bremen/Hessen/NRW)</td></tr>
-      <tr><td>Bayern</td><td><code>80–87 90–97</code> (63xxx/88xxx/89xxx bewusst nicht zugeordnet, mehrdeutig mit Hessen/Baden-Württemberg)</td></tr>
-      <tr><td>Bremen</td><td>keine (28xxx mehrdeutig mit Niedersachsen) — Erkennung über Bundesland-Feld oder Ort</td></tr>
-    </table>
-    <p>Das Bundesland dient nur als Vorfilter: Findet die Suche den Ort damit nicht, sucht sie ohne
-    Bundesland weiter.</p>
     <h3>Dateien und Speicherorte</h3>
     <table>
       <tr><th>Was</th><th>Wo</th></tr>
       <tr><td>Geocodierungsdatenbank</td><td><code>&lt;QGIS-Profil&gt;/gis_akademie_geocoder/geocoder.db</code> (Standard) oder der gespeicherte Pfad</td></tr>
       <tr><td>Vorübergehende Download-Dateien</td><td>Ordner <code>quellen</code> neben der Datenbank; nach erfolgreichem Import gelöscht, nach einem Fehler bis zum nächsten Abruf aufbewahrt</td></tr>
-      <tr><td>Eigene Quellen</td><td><code>&lt;QGIS-Profil&gt;/gis_akademie_geocoder/sources_user.json</code></td></tr>
-      <tr><td>Online geladene Quellenliste</td><td><code>sources_online.json</code> im QGIS-Profil</td></tr>
+      <tr><td>Eigene Quellen und online geladene Quellenliste</td><td>Ordner <code>&lt;QGIS-Profil&gt;/gis_akademie_geocoder</code></td></tr>
     </table>
   </div>
 

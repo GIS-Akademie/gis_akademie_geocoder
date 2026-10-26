@@ -590,9 +590,14 @@ _GEMEINDE_INDEX_COLS = {'gemeinde_norm', 'kurz_norm', 'bundesland', 'gemeinde',
 _ORTSTEIL_INDEX_COLS = {'alias_norm', 'gemeinde_norm', 'bundesland', 'n'}
 
 
-def rebuild_lookup_tables(conn, log=None, cancel=None):
+def rebuild_lookup_tables(conn, log=None, cancel=None, bundeslaender=None):
     """Rebuild gemeinde_index / ortsteil_index / bundesland_index /
     lookup_meta and refresh the planner statistics (ANALYZE).
+
+    bundeslaender: only renew the entries of these states (after updating
+    single states — seconds instead of minutes). This requires the directory
+    in its current structure; otherwise, or without a list, the whole
+    directory is rebuilt.
 
     Runs as ONE transaction: without an open transaction an explicit BEGIN is
     issued (Python's sqlite3 would otherwise autocommit every DROP/CREATE on
@@ -606,9 +611,13 @@ def rebuild_lookup_tables(conn, log=None, cancel=None):
     intact; the caller's own pending changes are kept when a SAVEPOINT was
     used) and RebuildCancelled is raised. Any other error is rolled back the
     same way and re-raised."""
+    states = sorted(set(bundeslaender)) if bundeslaender else None
+    if states is not None and not _lookup_structure_current(conn):
+        states = None
     if log:
         try:
-            log('Suchverzeichnis wird aktualisiert (bei der bundesweiten '
+            log('Suchverzeichnis wird aktualisiert …' if states else
+                'Suchverzeichnis wird aktualisiert (bei der bundesweiten '
                 'Datenbank zwei bis drei Minuten) …')
         except Exception:
             pass
@@ -625,7 +634,7 @@ def rebuild_lookup_tables(conn, log=None, cancel=None):
         # the nationwide DB) as soon as cancel() returns True.
         conn.set_progress_handler(lambda: 1 if cancel() else 0, 200000)
     try:
-        _rebuild_lookup_body(conn, check)
+        _rebuild_lookup_body(conn, check, states)
     except BaseException as e:
         if cancel is not None:
             conn.set_progress_handler(None, 0)   # must not interrupt the rollback
@@ -654,21 +663,44 @@ def _insert_chunked(conn, sql, rows, check):
         conn.executemany(sql, rows[i:i + _REBUILD_CHUNK])
 
 
-def _rebuild_lookup_body(conn, check):
-    for stmt in (
-        "DROP TABLE IF EXISTS gemeinde_index",
-        "DROP TABLE IF EXISTS ortsteil_index",
-        "DROP TABLE IF EXISTS bundesland_index",
-        "DROP TABLE IF EXISTS lookup_meta",
-        "CREATE TABLE gemeinde_index (gemeinde_norm TEXT, kurz_norm TEXT, "
-        "  bundesland TEXT, gemeinde TEXT, n INTEGER, cx REAL, cy REAL, epsg INTEGER)",
-        "CREATE TABLE ortsteil_index (alias_norm TEXT, gemeinde_norm TEXT, "
-        "  bundesland TEXT, n INTEGER)",
-        "CREATE TABLE bundesland_index (bundesland TEXT PRIMARY KEY, n INTEGER, "
-        "  n_ohne_plz INTEGER)",
-        "CREATE TABLE lookup_meta (key TEXT PRIMARY KEY, value TEXT)",
-    ):
-        conn.execute(stmt)
+def _lookup_structure_current(conn):
+    """Directory tables present in the current structure (schema version) —
+    precondition for renewing single states only."""
+    try:
+        have = {r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+        if not {'gemeinde_index', 'ortsteil_index', 'bundesland_index', 'lookup_meta'} <= have:
+            return False
+        row = conn.execute("SELECT value FROM lookup_meta WHERE key = 'schema_version'").fetchone()
+        return bool(row) and row[0] == str(LOOKUP_SCHEMA_VERSION) and _lookup_compatible(conn)
+    except Exception:
+        return False
+
+
+def _rebuild_lookup_body(conn, check, states=None):
+    """states None: build all tables from scratch; otherwise replace only the
+    rows of these states (the tables exist in the current structure)."""
+    if states is None:
+        for stmt in (
+            "DROP TABLE IF EXISTS gemeinde_index",
+            "DROP TABLE IF EXISTS ortsteil_index",
+            "DROP TABLE IF EXISTS bundesland_index",
+            "DROP TABLE IF EXISTS lookup_meta",
+            "CREATE TABLE gemeinde_index (gemeinde_norm TEXT, kurz_norm TEXT, "
+            "  bundesland TEXT, gemeinde TEXT, n INTEGER, cx REAL, cy REAL, epsg INTEGER)",
+            "CREATE TABLE ortsteil_index (alias_norm TEXT, gemeinde_norm TEXT, "
+            "  bundesland TEXT, n INTEGER)",
+            "CREATE TABLE bundesland_index (bundesland TEXT PRIMARY KEY, n INTEGER, "
+            "  n_ohne_plz INTEGER)",
+            "CREATE TABLE lookup_meta (key TEXT PRIMARY KEY, value TEXT)",
+        ):
+            conn.execute(stmt)
+        where, params = '', ()
+    else:
+        marks = ','.join('?' * len(states))
+        for table in ('gemeinde_index', 'ortsteil_index', 'bundesland_index'):
+            conn.execute(f"DELETE FROM {table} WHERE bundesland IN ({marks})", states)
+        where, params = f"WHERE bundesland IN ({marks}) ", tuple(states)
     check()
 
     # One scan yields the Gemeinde directory AND the PLZ coverage per Bundesland
@@ -678,7 +710,7 @@ def _rebuild_lookup_body(conn, check):
     rows = conn.execute(
         "SELECT gemeinde_norm, bundesland, gemeinde, epsg, COUNT(*), "
         "       AVG(x), AVG(y), SUM(CASE WHEN plz IS NULL OR plz = '' THEN 1 ELSE 0 END) "
-        "FROM addresses GROUP BY 1, 2, 3, 4").fetchall()
+        f"FROM addresses {where}GROUP BY 1, 2, 3, 4", params).fetchall()
     check()
     _insert_chunked(conn, "INSERT INTO gemeinde_index VALUES (?,?,?,?,?,?,?,?)",
                     [(gn, _kurz_norm(gn), bl, g, n, cx, cy, e)
@@ -695,7 +727,8 @@ def _rebuild_lookup_body(conn, check):
     rows = conn.execute(
         "SELECT kreis, gemeinde_norm, bundesland, COUNT(*) FROM addresses "
         "WHERE kreis IS NOT NULL AND kreis <> '' AND gemeinde_norm <> '' "
-        "GROUP BY 1, 2, 3").fetchall()
+        + (where.replace('WHERE', 'AND') if where else '')
+        + "GROUP BY 1, 2, 3", params).fetchall()
     check()
     agg = {}
     alias_cache = {}
@@ -710,17 +743,23 @@ def _rebuild_lookup_body(conn, check):
     _insert_chunked(conn, "INSERT INTO ortsteil_index VALUES (?,?,?,?)",
                     [(a, gn, bl, n) for (a, gn, bl), n in agg.items()], check)
 
-    for stmt in (
-        "CREATE INDEX idx_gi_norm  ON gemeinde_index(gemeinde_norm)",
-        "CREATE INDEX idx_gi_kurz  ON gemeinde_index(kurz_norm)",
-        "CREATE INDEX idx_oi_alias ON ortsteil_index(alias_norm)",
-    ):
-        conn.execute(stmt)
-    total = sum(a[0] for a in bl_agg.values())   # = COUNT(*), without a second scan
-    conn.execute("INSERT INTO lookup_meta VALUES ('address_count', ?)", (str(total),))
-    conn.execute("INSERT INTO lookup_meta VALUES ('schema_version', ?)",
+    if states is None:
+        for stmt in (
+            "CREATE INDEX idx_gi_norm  ON gemeinde_index(gemeinde_norm)",
+            "CREATE INDEX idx_gi_kurz  ON gemeinde_index(kurz_norm)",
+            "CREATE INDEX idx_oi_alias ON ortsteil_index(alias_norm)",
+        ):
+            conn.execute(stmt)
+    # = COUNT(*) of the table, without a second scan (the other states' counts
+    # are in bundesland_index already)
+    total = conn.execute("SELECT COALESCE(SUM(n), 0) FROM bundesland_index").fetchone()[0]
+    conn.execute("INSERT OR REPLACE INTO lookup_meta VALUES ('address_count', ?)", (str(total),))
+    conn.execute("INSERT OR REPLACE INTO lookup_meta VALUES ('schema_version', ?)",
                  (str(LOOKUP_SCHEMA_VERSION),))
     check()
+    if states is not None and conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE name = 'sqlite_stat1'").fetchone():
+        return       # statistics exist; single states hardly change them
 
     # Planner statistics: without sqlite_stat1 SQLite may pick idx_bundesland
     # (a whole state) instead of idx_gem_str / idx_plz_str. analysis_limit

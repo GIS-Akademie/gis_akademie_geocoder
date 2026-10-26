@@ -138,7 +138,7 @@ class SourceUpdateWorker(QObject):
                 self.detail.emit(f'Quellenliste: {text}')
         cat     = _sd.load_catalog()
         targets = self.bundeslaender or _sd.registered_bundeslaender(cat)
-        imported_any = False
+        updated = []                   # states with new data → renew their directory entries
 
         for i, bl in enumerate(targets):
             if self._cancelled:
@@ -162,7 +162,7 @@ class SourceUpdateWorker(QObject):
                 self.detail.emit(f'{bl}: {traceback.format_exc()}')
                 status, text = 'fehler', f'Unerwarteter Fehler: {e}'
             if status == 'aktualisiert':
-                imported_any = True
+                updated.append(bl)
             self.summary.append((bl, status, text))
             if not self.single and status in ('fehler', 'abgebrochen'):
                 self.log.emit(f'{STATUS_TEXT[status]}: {text}')
@@ -185,12 +185,16 @@ class SourceUpdateWorker(QObject):
                 self.detail.emit('PLZ-Nachlauf fehlgeschlagen:\n' + traceback.format_exc())
                 self.log.emit('Die PLZ-Ergänzung konnte nicht durchgeführt werden.')
 
-        if imported_any:
+        # Directory (places, districts, PLZ coverage) only for the states that
+        # changed: new data or postcodes filled in by the post-pass
+        changed = updated + [bl for bl, n in self.plz_ergaenzt.items() if n and bl not in updated]
+        if changed:
             self._prefix = ''
             self._emit_progress(0, 0, 'Suchverzeichnis wird aktualisiert …')
             conn = sqlite3.connect(_lc.DB_PATH)
             try:
-                _lc.rebuild_lookup_tables(conn, self.log.emit, cancel=self._is_cancelled)
+                _lc.rebuild_lookup_tables(conn, self.log.emit, cancel=self._is_cancelled,
+                                          bundeslaender=changed)
                 conn.commit()
             except _lc.RebuildCancelled:
                 # The previous directory stays; it is rebuilt automatically at the

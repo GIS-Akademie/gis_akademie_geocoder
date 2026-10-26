@@ -166,7 +166,8 @@ def test_batch_update_summary_and_single_lookup_rebuild(db, monkeypatch):
 
     calls = []
     real = lg.rebuild_lookup_tables
-    monkeypatch.setattr(lg, 'rebuild_lookup_tables', lambda conn, log=None, cancel=None: (calls.append(1), real(conn, log, cancel)))
+    monkeypatch.setattr(lg, 'rebuild_lookup_tables', lambda conn, log=None, cancel=None, bundeslaender=None:
+                        (calls.append(bundeslaender), real(conn, log, cancel, bundeslaender)))
 
     w = suw.SourceUpdateWorker(None, plugin_version='t')        # None = all automatic ones
     result = {}
@@ -177,7 +178,7 @@ def test_batch_update_summary_and_single_lookup_rebuild(db, monkeypatch):
     assert st == {'Nordrhein-Westfalen': 'aktualisiert', 'Berlin': 'unverändert',
                   'Sachsen': 'fehler'}                          # Hessen (manual) not attempted at all
     assert result['ok'] is False and 'Quellen-Aktualisierung' in result['msg']
-    assert len(calls) == 1                                       # directory built only once
+    assert calls == [['Nordrhein-Westfalen']]                    # directory once, only the updated state
     conn = db.get_connection()
     assert conn.execute("SELECT COUNT(*) FROM addresses WHERE bundesland='Nordrhein-Westfalen'").fetchone()[0] == 3
     assert conn.execute("SELECT COUNT(*) FROM addresses WHERE bundesland='Berlin'").fetchone()[0] == 4  # unchanged

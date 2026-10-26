@@ -428,3 +428,36 @@ def test_resolver_info_without_legacy_args():
             return {'layer': 'x', 'quelle_key': 'k'}
     assert lg.resolver_info(S()) == {'layer': 'x', 'quelle_key': 'k'}
     assert lg.resolver_info(None) is None
+
+
+# ── B39: renew the directory of single states only ──────────────────────────
+
+def _directory(conn):
+    def rows(sql):
+        return sorted(tuple(r) for r in conn.execute(sql).fetchall())
+    return (rows("SELECT * FROM gemeinde_index"), rows("SELECT * FROM ortsteil_index"),
+            rows("SELECT * FROM bundesland_index"),
+            dict(tuple(r) for r in conn.execute("SELECT key, value FROM lookup_meta").fetchall()))
+
+
+def test_partial_rebuild_equals_full_rebuild(db):
+    conn = db.get_connection()
+    lg.rebuild_lookup_tables(conn)
+    conn.commit()
+    bl, = conn.execute("SELECT bundesland FROM addresses GROUP BY 1 ORDER BY COUNT(*) DESC "
+                       "LIMIT 1").fetchone()
+    # change the state: one address less, one more in a new place
+    conn.execute("DELETE FROM addresses WHERE rowid = (SELECT MIN(rowid) FROM addresses "
+                 "WHERE bundesland = ?)", (bl,))
+    conn.execute("INSERT INTO addresses (bundesland, kreis, gemeinde, plz, strasse, hausnummer, "
+                 "hausnr_zusatz, epsg, x, y, strasse_norm, gemeinde_norm) "
+                 "VALUES (?, 'Neukreis', 'Neudorf', '', 'Weg', '1', '', 25832, 1, 2, 'weg', 'neudorf')",
+                 (bl,))
+    lg.rebuild_lookup_tables(conn, bundeslaender=[bl])
+    conn.commit()
+    partial = _directory(conn)
+    assert lg.lookup_tables_ready(conn)            # address count in lookup_meta is right
+    lg.rebuild_lookup_tables(conn)
+    conn.commit()
+    assert _directory(conn) == partial
+    conn.close()

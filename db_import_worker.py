@@ -560,7 +560,7 @@ class AddressSink:
         # Municipality/locality index for the new data (part of the same
         # transaction), then ONE atomic commit including the DELETE.
         if self.rebuild_lookup:
-            _lc.rebuild_lookup_tables(self.conn, self._log)
+            _lc.rebuild_lookup_tables(self.conn, self._log, bundeslaender=list(self.states))
         self.conn.commit()
         return True, None
 

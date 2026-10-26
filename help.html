@@ -106,7 +106,7 @@
     <ol>
       <li><strong>Datenbank einrichten (einmalig).</strong> Reiter „Datenbank &amp; Quellen“ öffnen und
         <em>Alle eingetragenen Quellen aktualisieren</em> klicken. Das Plugin lädt alle 16 Bundesländer
-        nacheinander. Beim ersten Mal dauert das rund 2,5–3 Stunden (siehe
+        nacheinander. Beim ersten Mal dauert das rund 2–2,5 Stunden (siehe
         <a href="#aufwand">Aufwand je Bundesland</a>) — am besten über Nacht. Wer die Einrichtung
         sparen möchte, kann eine fertige Datenbank einbinden (siehe <a href="#abo">Geodatenabo Plus</a>).</li>
       <li><strong>Datei geocodieren.</strong> Im Reiter „Geocodierung“ die Adressdatei wählen, die
@@ -169,8 +169,8 @@
 
     <h3>Nach dem ersten Einrichten</h3>
     <ul>
-      <li>Am Ende jedes Abrufs aktualisiert das Plugin sein Verzeichnis der Orte und Ortsteile (bei der
-    bundesweiten Datenbank zwei bis drei Minuten); danach ist die Datenbank sofort einsatzbereit.</li>
+      <li>Am Ende jedes Abrufs aktualisiert das Plugin sein Verzeichnis der Orte und Ortsteile — nur für
+    die Länder mit neuen Daten, meist in Sekunden; danach ist die Datenbank sofort einsatzbereit.</li>
       <li><strong>Aktualisieren:</strong> Ein erneuter Klick auf <em>Alle eingetragenen Quellen
         aktualisieren</em> lädt nur, was seit dem letzten Abruf neu ist — meist dauert das nur Minuten. Das
         Plugin lädt nie von selbst; wann Sie aktualisieren, bestimmen Sie.</li>
@@ -188,7 +188,7 @@
       <tr><td>Baden-Württemberg</td><td>73&nbsp;MB</td><td>3–5&nbsp;min</td><td class="zahl">3,09&nbsp;Mio.</td><td>ergänzt</td></tr>
       <tr><td>Bayern</td><td>860&nbsp;MB (OpenStreetMap)</td><td>8–10&nbsp;min</td><td class="zahl">2,51&nbsp;Mio.</td><td>aus OSM, Rest ergänzt</td></tr>
       <tr><td>Berlin</td><td>10&nbsp;MB</td><td>&lt; 1&nbsp;min</td><td class="zahl">0,39&nbsp;Mio.</td><td>enthalten</td></tr>
-      <tr><td>Brandenburg</td><td>ca. 1,7&nbsp;GB (WFS, Kacheln)</td><td>ca. 60 min</td><td class="zahl">0,87&nbsp;Mio.</td><td>ergänzt</td></tr>
+      <tr><td>Brandenburg</td><td>ca. 1,7&nbsp;GB (WFS, Kacheln)</td><td>ca. 30 min</td><td class="zahl">0,87&nbsp;Mio.</td><td>ergänzt</td></tr>
       <tr><td>Bremen</td><td>11&nbsp;MB</td><td>ca. 1&nbsp;min</td><td class="zahl">0,18&nbsp;Mio.</td><td>enthalten</td></tr>
       <tr><td>Hamburg</td><td>ca. 1,6&nbsp;GB (WFS)</td><td>10–15&nbsp;min</td><td class="zahl">0,30&nbsp;Mio.</td><td>enthalten</td></tr>
       <tr><td>Hessen</td><td>29&nbsp;MB</td><td>1–2&nbsp;min</td><td class="zahl">1,63&nbsp;Mio.</td><td>ergänzt</td></tr>
@@ -201,7 +201,7 @@
       <tr><td>Sachsen-Anhalt</td><td>19&nbsp;MB</td><td>ca. 1–2&nbsp;min</td><td class="zahl">0,66&nbsp;Mio.</td><td>ergänzt</td></tr>
       <tr><td>Schleswig-Holstein</td><td>16&nbsp;MB</td><td>ca. 1&nbsp;min</td><td class="zahl">0,95&nbsp;Mio.</td><td>enthalten</td></tr>
       <tr><td>Thüringen</td><td>11&nbsp;MB (Ersatz: 26&nbsp;MB INSPIRE)</td><td>ca. 1–3&nbsp;min</td><td class="zahl">0,62&nbsp;Mio.</td><td>ergänzt</td></tr>
-      <tr class="summe"><td>Alle 16 Länder</td><td>rund 11&nbsp;GB</td><td>rund 2,5–3&nbsp;h</td><td class="zahl">rund 21,5&nbsp;Mio.</td><td></td></tr>
+      <tr class="summe"><td>Alle 16 Länder</td><td>rund 11&nbsp;GB</td><td>rund 2–2,5&nbsp;h</td><td class="zahl">rund 21,5&nbsp;Mio.</td><td></td></tr>
     </table>
     <p><strong>PLZ:</strong> „enthalten“ = die Quelle liefert Postleitzahlen mit; „ergänzt“ = das Plugin
     ergänzt sie automatisch aus den mitgelieferten PLZ-Gebieten (siehe <a href="#plz">Postleitzahlen</a>).
@@ -545,7 +545,7 @@
       <tr><td>Baden-Württemberg</td><td>opengeodata.lgl-bw.de, feste Datei-URL</td><td>HK-DE-Text</td><td>Rund 3 Mio. Gebäudepositionen, ohne Postleitzahlen – sie werden automatisch ergänzt. Gebäude ohne echte Hausnummer (Pseudo-Nummern aus Koordinaten) werden übergangen.</td></tr>
       <tr><td>Bayern</td><td>download.geofabrik.de, feste Datei-URL</td><td>OpenStreetMap (.osm.pbf)</td><td>Nicht amtlich: rund 2,5 Mio. Adressen aus OpenStreetMap (© OpenStreetMap-Mitwirkende, ODbL). Amtliche Hauskoordinaten gibt es in Bayern nur kostenpflichtig. Beim Aktualisieren übersprungen, solange der letzte Abruf weniger als 28 Tage zurückliegt. Abruf: rund 10 Minuten.</td></tr>
       <tr><td>Berlin</td><td>gdi.berlin.de, Atom-Feed</td><td>HK-DE-Text</td><td>Rund 395.000 Adressen mit Postleitzahlen.</td></tr>
-      <tr><td>Brandenburg</td><td>inspire.brandenburg.de, INSPIRE-WFS</td><td>INSPIRE-GML</td><td>Rund 870.000 Adressen, ohne Postleitzahlen – sie werden automatisch ergänzt. Beim Aktualisieren übersprungen, solange der letzte Abruf weniger als 28 Tage zurückliegt. Abruf: rund eine Stunde (ca. 1,7 GB).</td></tr>
+      <tr><td>Brandenburg</td><td>inspire.brandenburg.de, INSPIRE-WFS</td><td>INSPIRE-GML</td><td>Rund 870.000 Adressen, ohne Postleitzahlen – sie werden automatisch ergänzt. Beim Aktualisieren übersprungen, solange der letzte Abruf weniger als 28 Tage zurückliegt. Abruf: rund eine halbe Stunde (ca. 1,7 GB).</td></tr>
       <tr><td>Bremen</td><td>gdi2.geo.bremen.de, feste Datei-URL</td><td>Shapefile</td><td>Rund 176.000 Adressen mit Postleitzahlen (Bremen und Bremerhaven).</td></tr>
       <tr><td>Hamburg</td><td>geodienste.hamburg.de, INSPIRE-WFS</td><td>INSPIRE-GML</td><td>Rund 300.000 Adressen mit Postleitzahlen. Beim Aktualisieren übersprungen, solange der letzte Abruf weniger als 28 Tage zurückliegt. Abruf: rund 10–15 Minuten.</td></tr>
       <tr><td>Hessen</td><td>gds.hessen.de, feste Datei-URL</td><td>HK-DE-Text</td><td>Rund 1,6 Mio. Adressen, ohne Postleitzahlen – sie werden automatisch aus den mitgelieferten PLZ-Gebieten ergänzt.</td></tr>

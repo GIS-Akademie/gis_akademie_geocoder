@@ -36,7 +36,7 @@ Python-Paket `xlrd` gebraucht.
 ## Erste Schritte
 
 1. **Datenbank einrichten (einmalig):** Reiter „Datenbank & Quellen“ öffnen und *Alle eingetragenen
-   Quellen aktualisieren* klicken. Für alle 16 Länder dauert das beim ersten Mal rund 2,5–3 Stunden
+   Quellen aktualisieren* klicken. Für alle 16 Länder dauert das beim ersten Mal rund 2–2,5 Stunden
    (rund 11 GB Download, fertige Datenbank 5–6 GB). Wer nur Adressen aus wenigen Ländern hat, lädt
    nur diese.
 2. **Geocodieren:** Im Reiter „Geocodierung“ die Datei wählen, die Spaltenzuordnung prüfen, Ziel und

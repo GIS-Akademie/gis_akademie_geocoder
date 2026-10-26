@@ -12,6 +12,12 @@ amtlicher Hauskoordinaten (alle 16 Bundesländer) mit Nominatim als optionalem F
 Ergebnis ist ein GeoPackage-Layer in QGIS. Details, Datenquellen und Lizenzen: `help.html`
 (im Plugin über „Hilfe“).
 
+## Änderungsprotokoll
+
+<!-- AENDERUNGEN -->
+- **1.0** – Erste Veröffentlichung im QGIS-Plugin-Verzeichnis. Geocodiert Adresstabellen (CSV, Excel, OpenDocument, Tab-getrennt) gegen eine lokale Datenbank amtlicher Hauskoordinaten aller 16 Bundesländer, optional mit Nominatim als Ausweichsuche oder vollständig offline (DSGVO-Modus). Die Datenbank wird im Plugin eingerichtet und aktualisiert: Ein Klick lädt die offenen Daten der Länder und importiert nur, was sich geändert hat; die Quellenliste lässt sich online aktualisieren. Fehlende Postleitzahlen werden aus den mitgelieferten PLZ-Gebieten (OpenStreetMap) ergänzt.
+<!-- /AENDERUNGEN -->
+
 ## Aufbau
 
 | Datei | Zweck |
@@ -108,7 +114,8 @@ python -m pytest tests -q
 ## Deploy
 
 Vor jeder Auslieferung die Version in `metadata.txt` erhöhen (QGIS ersetzt ein Plugin gleicher
-Version nicht zuverlässig) und den Changelog ergänzen. Zum Verpacken den Plugin-Ordner **ohne**
+Version nicht zuverlässig) und den Changelog in `metadata.txt` ergänzen; `python tools/build_help_tables.py`
+überträgt ihn in die Hilfe und in diese README. Zum Verpacken den Plugin-Ordner **ohne**
 `material/`, `tests/`, `tools/`, `__pycache__/` zippen (`sources.json` muss enthalten sein).
 
 ## Lizenz

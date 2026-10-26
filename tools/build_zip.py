@@ -88,7 +88,10 @@ def check_metadata(meta, errors, warnings):
         import build_help_tables
         cat = __import__('json').load(open(os.path.join(PLUGIN_DIR, 'sources.json'), encoding='utf-8'))
         if build_help_tables.render(hilfe, cat) != hilfe:
-            errors.append('help.html passt nicht zu sources.json — tools/build_help_tables.py ausführen')
+            errors.append('help.html passt nicht zu sources.json/metadata.txt — tools/build_help_tables.py ausführen')
+        readme = open(os.path.join(PLUGIN_DIR, 'README.md'), encoding='utf-8').read()
+        if build_help_tables.render_readme(readme) != readme:
+            errors.append('Änderungsprotokoll in README.md veraltet — tools/build_help_tables.py ausführen')
     except (OSError, NameError, SystemExit) as e:
         warnings.append(f'Quellentabellen der Hilfe nicht geprüft ({e})')
     icon = meta.get('icon', '').lstrip('./')

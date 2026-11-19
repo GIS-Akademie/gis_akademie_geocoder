@@ -38,6 +38,17 @@ from .db_import_worker import (
 )
 from .plz_resolver import build_resolver_logged, attr_text, plz_text
 
+# Some source files (e.g. Bremen ALKIS: field adz) store the text 'NULL'
+# in empty columns instead of a real NULL. Such values count as empty.
+_NULL_TEXTS = frozenset({'null', 'none'})
+
+
+def _text(val):
+    """attr_text() that also treats the literal texts 'NULL'/'None'/'null'
+    (any spelling) as empty."""
+    s = attr_text(val)
+    return '' if s.lower() in _NULL_TEXTS else s
+
 
 def _n(x):
     """Integer with German thousands separator: 4509537 -> '4.509.537'."""
@@ -301,24 +312,24 @@ class ShpImportWorker(QObject):
                     counters['skip'] += 1
                     continue
 
-            strasse = attr_text(feature[f_strasse])
+            strasse = _text(feature[f_strasse])
             if not strasse:
                 # building outline without an assigned address → skip
                 counters['skip'] += 1
                 continue
 
-            zusatz = attr_text(feature[f_zusatz]) if f_zusatz else ''
-            numbers = _hausnummer_rows(attr_text(feature[f_hausnr]), zusatz)
+            zusatz = _text(feature[f_zusatz]) if f_zusatz else ''
+            numbers = _hausnummer_rows(_text(feature[f_hausnr]), zusatz)
             if not numbers:
                 counters['skip'] += 1     # implausible pseudo number / no number
                 continue
 
-            raw_gem = attr_text(feature[f_gemeinde]) if f_gemeinde else ''
+            raw_gem = _text(feature[f_gemeinde]) if f_gemeinde else ''
             gemeinde_val = gem_cache.get(raw_gem)
             if gemeinde_val is None:
                 gemeinde_val = gem_cache[raw_gem] = _clean_gemeinde(raw_gem) or self.bundesland
 
-            plz_val = plz_text(feature[f_plz]) if f_plz else ''
+            plz_val = plz_text(_text(feature[f_plz])) if f_plz else ''
             herkunft = None
             if not plz_val and resolver is not None:
                 plz_val = resolver.lookup(x, y, target_epsg)
@@ -368,7 +379,7 @@ class ShpImportWorker(QObject):
                 fname = field_map.get(logical)
                 if not fname or fname not in names:
                     return ''
-                return attr_text(feature[fname])
+                return _text(feature[fname])
 
             previews.append({
                 'strasse':       _attr('strasse'),

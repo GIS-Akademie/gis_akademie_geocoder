@@ -461,3 +461,36 @@ def test_partial_rebuild_equals_full_rebuild(db):
     conn.commit()
     assert _directory(conn) == partial
     conn.close()
+
+
+# ── Literal text 'NULL' as house number suffix (Bremen ALKIS shapefile) ─────
+
+@pytest.mark.parametrize('zusatz', ['NULL', 'null', 'Null', 'None', 'none', ' NULL '])
+def test_row_hausnummer_ignores_null_text(zusatz):
+    assert lg._row_hausnummer('72', zusatz) == '72'
+    assert lg._row_hn_key('72', zusatz) == '72'
+
+
+def test_row_hn_sql_ignores_null_text():
+    conn = sqlite3.connect(':memory:')
+    conn.execute("CREATE TABLE addresses (hausnummer TEXT, hausnr_zusatz TEXT)")
+    conn.executemany("INSERT INTO addresses VALUES (?, ?)", [
+        ('72', 'NULL'), ('72', 'none'), ('72', None), ('72', 'a'), ('16', '1'), ('12', '/1'),
+    ])
+    got = [r[0] for r in conn.execute(f"SELECT {lg._ROW_HN_SQL} FROM addresses")]
+    assert got == ['72', '72', '72', '72a', '16/1', '12/1']
+
+
+def test_search_with_null_text_suffix(tmp_path):
+    make_db(tmp_path, [
+        ('Bremen', '', 'Bremen', '28195', 'Contrescarpe', '72', 'NULL', 25832, 488000, 5882000),
+        ('Bremen', '', 'Bremen', '28195', 'Contrescarpe', '72', 'a', 25832, 488010, 5882000),
+        ('Bremen', '', 'Bremen', '28195', 'Contrescarpe', '74', 'NULL', 25832, 488020, 5882000),
+    ])
+    h = top(strasse='Contrescarpe', hausnummer='72', gemeinde='Bremen')
+    assert (h['hausnummer'], h['hn_score'], h['x']) == ('72', 1.0, 488000.0)
+    assert '72NULL' not in [x['hausnummer'] for x in
+                            lg.search('Contrescarpe', '72', '', 'Bremen', max_results=3)]
+    # fallback (street only / nearest number) shows the number without the text
+    rp = lg.street_representative('contrescarpe', 'bremen', 'Bremen', hausnummer='75')
+    assert rp and (rp['kind'], rp['hausnummer']) == ('nearest', '74')

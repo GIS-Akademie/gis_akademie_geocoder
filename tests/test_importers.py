@@ -156,6 +156,34 @@ def test_attr_text_and_plz_text():
     assert pr.plz_text('D-1067') == 'D-1067'                     # not all digits: unchanged
 
 
+def _shp_module():
+    """shp_import_worker needs qgis.core; without QGIS a stub with the imported
+    names is enough to load the module (the helpers under test are QGIS-free)."""
+    import sys
+    import types
+    name = f'{PKG_NAME}.shp_import_worker'
+    if name in sys.modules:
+        return sys.modules[name]
+    if 'qgis.core' not in sys.modules:
+        core = types.ModuleType('qgis.core')
+        for n in ('QgsVectorLayer', 'QgsCoordinateReferenceSystem', 'QgsCoordinateTransform',
+                  'QgsProject', 'QgsWkbTypes', 'QgsPointXY'):
+            setattr(core, n, type(n, (), {}))
+        sys.modules['qgis.core'] = core
+    return importlib.import_module(name)
+
+
+@pytest.mark.parametrize('raw', ['NULL', 'null', 'Null', 'None', 'none', ' NULL ', None, ''])
+def test_shp_text_treats_null_text_as_empty(raw):
+    """Bremen ALKIS shapefile: the field adz holds the literal text 'NULL'
+    for addresses without a suffix; it must not become part of the number."""
+    shp = _shp_module()
+    assert shp._text(raw) == ''
+    assert shp._text(_FakeNullVariant()) == ''
+    assert shp._text(' a ') == 'a' and shp._text(12.0) == '12'
+    assert shp._hausnummer_rows('72', shp._text(raw)) == [('72', '')]
+
+
 def test_py_resolver_numeric_plz_property(tmp_path):
     p = _write_areas(str(tmp_path / 'n.geojson'), [(1067, _square(0, 0, 10, 10))], gz=False)
     r = pr.PyPlzResolver(p)

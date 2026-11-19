@@ -335,6 +335,11 @@ def normalize_hausnummer(h):
     return re.sub(r'\s+', '', h)
 
 
+# Databases built from older imports may hold the literal text 'NULL' as
+# house number suffix (Bremen ALKIS shapefile, field adz). Treated as empty.
+_NULL_ZUSATZ = frozenset({'null', 'none'})
+
+
 def _row_hausnummer(hausnummer, zusatz):
     """Display form of a stored house number. A purely numeric suffix is a
     sub-number and is joined with '/' (HK-DE Baden-Württemberg stores
@@ -342,6 +347,8 @@ def _row_hausnummer(hausnummer, zusatz):
     letters and suffixes that already carry the '/' are appended directly."""
     hn = (hausnummer or '').strip()
     z  = (zusatz or '').strip()
+    if z.lower() in _NULL_ZUSATZ:
+        z = ''
     if z[:1].isdigit():
         return f'{hn}/{z}'
     return hn + z
@@ -353,10 +360,13 @@ def _row_hn_key(hausnummer, zusatz):
 
 
 # SQL equivalent of _row_hn_key() (for ORDER BY in the candidate query).
-_ROW_HN_SQL = ("replace(lower(CASE WHEN substr(trim(coalesce(hausnr_zusatz, '')), 1, 1)"
+# The suffix with the literal texts 'NULL'/'None' mapped to '' (see _NULL_ZUSATZ).
+_ZUSATZ_SQL = ("CASE WHEN lower(trim(coalesce(hausnr_zusatz, ''))) IN ('null', 'none')"
+               " THEN '' ELSE coalesce(hausnr_zusatz, '') END")
+_ROW_HN_SQL = (f"replace(lower(CASE WHEN substr(trim({_ZUSATZ_SQL}), 1, 1)"
                " BETWEEN '0' AND '9'"
-               " THEN coalesce(hausnummer, '') || '/' || trim(hausnr_zusatz)"
-               " ELSE coalesce(hausnummer, '') || coalesce(hausnr_zusatz, '') END), ' ', '')")
+               f" THEN coalesce(hausnummer, '') || '/' || trim({_ZUSATZ_SQL})"
+               f" ELSE coalesce(hausnummer, '') || {_ZUSATZ_SQL} END), ' ', '')")
 
 
 def _extract_hausnummer(strasse_n):

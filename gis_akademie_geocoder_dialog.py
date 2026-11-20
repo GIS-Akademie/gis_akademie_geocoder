@@ -11,7 +11,7 @@ from qgis.PyQt.QtWidgets import (QDialog, QFileDialog, QMessageBox, QInputDialog
                                  QVBoxLayout, QHBoxLayout,
                                  QTableWidget, QTableWidgetItem, QHeaderView,
                                  QAbstractItemView)
-from qgis.PyQt.QtCore import QUrl, QThread, QVariant, QObject, pyqtSignal, Qt
+from qgis.PyQt.QtCore import QUrl, QThread, QVariant, QObject, QEvent, pyqtSignal, Qt
 from qgis.PyQt.QtGui import QDesktopServices, QPalette, QColor
 
 from qgis.core import (
@@ -19,7 +19,7 @@ from qgis.core import (
     QgsFields, QgsField, QgsFeature, QgsGeometry,
     QgsPointXY, QgsSettings,
     QgsCoordinateReferenceSystem, QgsCoordinateTransform,
-    QgsMessageLog, Qgis
+    QgsMessageLog, QgsMimeDataUtils, Qgis
 )
 
 # Technical details (URLs, file names, tracebacks) go to the QGIS message
@@ -37,6 +37,7 @@ from .source_downloader import describe, is_automatic
 from .source_update_worker import SourceUpdateWorker
 from .source_editor_dialog import SourceEditDialog
 from . import plz_resolver as _plz
+from . import drop_paths as _drop
 from .geocoder_worker import PLUGIN_VERSION
 
 
@@ -216,6 +217,7 @@ class GISAkademieGeocoderDialog(QDialog, FORM_CLASS):
         }
 
         self._connect_signals()
+        self._install_drop_targets()
         self._last_db_stats = None
         self._build_admin_page()
         # Fill the DB path field with the current path
@@ -296,6 +298,64 @@ class GISAkademieGeocoderDialog(QDialog, FORM_CLASS):
         self.btn_db_browse.clicked.connect(self._browse_db_path)
         self.btn_db_save.clicked.connect(self._save_db_path)
         self.btn_import_stop.clicked.connect(self._import_cancel)
+
+    # ─────────────────────────────── Drag & drop ──
+
+    def _install_drop_targets(self):
+        """Files can be dropped onto the three path fields (and anywhere on
+        their group box) instead of using „Durchsuchen …“ — from the file
+        manager or from the QGIS browser panel. A drop does exactly what the
+        button does and is refused while the button is disabled."""
+        self._drop_targets = {}
+        for widgets, exts, button, apply in (
+                ((self.grp_input, self.le_csv), _drop.INPUT_EXTS, self.btn_csv, self._drop_input),
+                ((self.grp_output, self.le_gpkg, self.le_layer_name), _drop.GPKG_EXTS, self.btn_gpkg,
+                 self.le_gpkg.setText),
+                ((self.grp_db_path, self.le_db_path), _drop.DB_EXTS, self.btn_db_browse,
+                 self.le_db_path.setText)):
+            for w in widgets:
+                w.setAcceptDrops(True)
+                w.installEventFilter(self)
+                self._drop_targets[w] = (exts, button, apply)
+
+    def _drop_input(self, path):
+        if path == self.le_csv.text().strip():
+            self._load_input(path)       # same file dropped again: reload it
+        else:
+            self.le_csv.setText(path)    # textChanged validates and loads
+
+    @staticmethod
+    def _dropped_path(mime, exts):
+        """The file a drag carries for a field with the extensions `exts`,
+        or '' — then the event is left to the widget (e.g. dragged text)."""
+        cands = []
+        with contextlib.suppress(Exception):
+            if mime.hasUrls():
+                cands += [u.toLocalFile() or u.toString() for u in mime.urls()]
+        with contextlib.suppress(Exception):
+            if QgsMimeDataUtils.isUriList(mime):
+                cands += [u.uri for u in QgsMimeDataUtils.decodeUriList(mime)]
+        return _drop.pick_path(cands, exts)
+
+    def eventFilter(self, obj, event):
+        target = getattr(self, '_drop_targets', {}).get(obj)
+        if target is not None and event.type() in (
+                QEvent.Type.DragEnter, QEvent.Type.DragMove, QEvent.Type.Drop):
+            exts, button, apply = target
+            mime = event.mimeData()
+            carries_files = mime.hasUrls() or QgsMimeDataUtils.isUriList(mime)
+            path = self._dropped_path(mime, exts) if button.isEnabled() else ''
+            if path:
+                event.acceptProposedAction()
+                if event.type() == QEvent.Type.Drop:
+                    apply(path)
+                return True
+            if carries_files:
+                # unsuitable file: refuse it here, otherwise a line edit
+                # would insert the file URL as text
+                event.ignore()
+                return True
+        return super().eventFilter(obj, event)
 
     def _show_help(self):
         help_path = os.path.join(os.path.dirname(__file__), 'help.html')
